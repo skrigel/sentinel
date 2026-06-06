@@ -40,6 +40,14 @@ def route_after_self_test(state) -> str:
     return "unresolved"
 
 
+def route_after_diagnosis_check(state) -> str:
+    if state.get("diagnosis_grounded"):
+        return "selftest"
+    if state.get("fix_attempts", 0) < MAX_FIX_ATTEMPTS:
+        return "replan"
+    return "unresolved"
+
+
 def route_after_verify(state) -> str:
     verification = state.get("verification") or {}
     if verification.get("recovered"):

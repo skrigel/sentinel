@@ -15,6 +15,12 @@ def no_redis_broadcast(monkeypatch):
 
     monkeypatch.setattr(graph_nodes, "broadcast", noop)
     monkeypatch.setattr(graph_nodes, "narrate", noop)
+    monkeypatch.setattr(
+        graph_nodes,
+        "score_hallucination",
+        lambda query, context, output: {"passed": True, "metadata": {"score": 0.0}},
+    )
+    monkeypatch.setattr(graph_nodes.memory, "embed", lambda text: [1.0, 0.0])
 
 
 @pytest.mark.asyncio

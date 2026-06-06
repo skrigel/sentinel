@@ -6,6 +6,7 @@ import io
 from .nodes import (
     n_apply,
     n_await_approval,
+    n_check_diagnosis,
     n_classify_cause,
     n_evidence_collector,
     n_memory_investigate,
@@ -20,6 +21,7 @@ from .nodes import (
 )
 from .routing import (
     route_after_classify,
+    route_after_diagnosis_check,
     route_after_investigation,
     route_after_self_test,
     route_after_triage,
@@ -49,6 +51,7 @@ def build_incident_graph():
     graph.add_node("classify_cause", n_classify_cause)
     graph.add_node("retrieve_fix", n_retrieve_fix)
     graph.add_node("plan_fix", n_plan_fix)
+    graph.add_node("check_diagnosis", n_check_diagnosis)
     graph.add_node("self_test", n_self_test)
     graph.add_node("await_approval", n_await_approval)
     graph.add_node("apply", n_apply)
@@ -84,7 +87,16 @@ def build_incident_graph():
         },
     )
     graph.add_edge("retrieve_fix", "plan_fix")
-    graph.add_edge("plan_fix", "self_test")
+    graph.add_edge("plan_fix", "check_diagnosis")
+    graph.add_conditional_edges(
+        "check_diagnosis",
+        route_after_diagnosis_check,
+        {
+            "selftest": "self_test",
+            "replan": "plan_fix",
+            "unresolved": "report_unresolved",
+        },
+    )
     graph.add_conditional_edges(
         "self_test",
         route_after_self_test,

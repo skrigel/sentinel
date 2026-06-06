@@ -1,4 +1,5 @@
 from graph.routing import (
+    route_after_diagnosis_check,
     route_after_classify,
     route_after_investigation,
     route_after_self_test,
@@ -60,6 +61,19 @@ def test_route_after_self_test():
         == "unresolved"
     )
     assert route_after_self_test({}) == "replan"
+
+
+def test_route_after_diagnosis_check():
+    assert route_after_diagnosis_check({"diagnosis_grounded": True}) == "selftest"
+    assert (
+        route_after_diagnosis_check({"diagnosis_grounded": False, "fix_attempts": 1})
+        == "replan"
+    )
+    assert (
+        route_after_diagnosis_check({"diagnosis_grounded": False, "fix_attempts": 2})
+        == "unresolved"
+    )
+    assert route_after_diagnosis_check({}) == "replan"
 
 
 def test_route_after_verify():

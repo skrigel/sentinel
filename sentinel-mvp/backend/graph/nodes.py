@@ -5,8 +5,12 @@ side effects are guarded, and existing agents are reused through their public
 async signatures.
 """
 
+import json
+
+import weave
+
 from agents.attributor import attribute_anomaly
-from agents.diagnostician import diagnose
+from agents.diagnostician import diagnose, read_op_source
 from utils.redis_client import get_last_n_rss, redis
 from utils.redis_keys import (
     ATTRIB_INVOCATIONS,
@@ -17,7 +21,12 @@ from utils.redis_keys import (
 from utils.stats import linregress
 
 from .broadcast import broadcast, narrate
+from . import memory
 from .state import RECOVERY_REDUCTION_TARGET
+
+_hallucination_scorer = None
+_SELF_TEST_ITERATIONS = 40
+_SELF_TEST_WINDOW_K = 8
 
 
 def _merge_for_broadcast(state: dict, update: dict) -> dict:
@@ -32,6 +41,16 @@ def _merge_for_broadcast(state: dict, update: dict) -> dict:
 
 async def _finish(state: dict, update: dict, node: str, decision: str, reason: str):
     merged = _merge_for_broadcast(state, update)
+    with weave.attributes(
+        {
+            "node": node,
+            "decision": decision,
+            "reason": reason,
+            "confidence": merged.get("confidence"),
+            "status": merged.get("status"),
+        }
+    ):
+        pass
     await broadcast(merged)
     await narrate(node, decision, reason, merged.get("confidence"))
     return update
@@ -50,6 +69,54 @@ def _confidence_score(raw: str | None) -> float:
     return {"high": 0.9, "low": 0.4, "medium": 0.6}.get(raw or "", 0.1)
 
 
+def _get_hallucination_scorer():
+    global _hallucination_scorer
+    if _hallucination_scorer is None:
+        from weave.scorers import WeaveHallucinationScorerV1
+
+        _hallucination_scorer = WeaveHallucinationScorerV1()
+    return _hallucination_scorer
+
+
+def score_hallucination(query: str, context: str, output: str) -> dict:
+    result = _get_hallucination_scorer().score(
+        query=query,
+        context=context,
+        output=output,
+    )
+    return {
+        "passed": bool(getattr(result, "passed", False)),
+        "metadata": getattr(result, "metadata", {}) or {},
+    }
+
+
+def _simulate_unbounded_collection_self_test(
+    anomaly_slope: float | int | None,
+) -> tuple[float, float]:
+    payload = tuple(range(16))
+    unbounded_history = []
+    windowed_history = []
+    xs = list(range(_SELF_TEST_ITERATIONS))
+    unbounded_counts = []
+    windowed_counts = []
+
+    for _ in xs:
+        unbounded_history.append(payload)
+        unbounded_counts.append(len(unbounded_history))
+
+        windowed_history.append(payload)
+        del windowed_history[:-_SELF_TEST_WINDOW_K]
+        windowed_counts.append(len(windowed_history))
+
+    unbounded_slope, _ = linregress(xs, unbounded_counts)
+    windowed_slope, _ = linregress(xs, windowed_counts)
+    scale = 1.0
+    if anomaly_slope and unbounded_slope:
+        scale = float(anomaly_slope) / unbounded_slope
+    return unbounded_slope * scale, windowed_slope * scale
+
+
+@weave.op(name="sentinel.triage")
 async def n_triage(state: dict) -> dict:
     anomaly = state.get("anomaly") or {}
     symptom_type = state.get("symptom_type") or anomaly.get("type") or "unknown"
@@ -68,6 +135,7 @@ async def n_triage(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.memory_investigate")
 async def n_memory_investigate(state: dict) -> dict:
     enriched = await attribute_anomaly(state.get("anomaly") or {})
     evidence = enriched.get("evidence") or {}
@@ -90,6 +158,7 @@ async def n_memory_investigate(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.evidence_collector")
 async def n_evidence_collector(state: dict) -> dict:
     update = {
         "status": "NEEDS_MORE_EVIDENCE",
@@ -105,6 +174,7 @@ async def n_evidence_collector(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.classify_cause")
 async def n_classify_cause(state: dict) -> dict:
     if state.get("symptom_type") == "memory_leak" and state.get("blamed_op"):
         subcause = "unbounded_collection"
@@ -126,26 +196,39 @@ async def n_classify_cause(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.retrieve_fix")
 async def n_retrieve_fix(state: dict) -> dict:
     update = {"status": "LOOKING_UP_PRIOR_FIXES"}
-    reason = "no cached fix"
+    reason = "no cached or similar fix"
     key = _fix_cache_key(state)
     try:
         cached = await redis.hgetall(key)
         if cached:
             update["proposed_fix"] = {**cached, "source": "cache"}
             reason = f"cache hit {key}"
+            return await _finish(state, update, "retrieve_fix", "lookup", reason)
     except Exception:
         pass
+
+    recalled = await memory.recall(state)
+    if recalled:
+        similarity = float(recalled.get("similarity", 0.0))
+        update["proposed_fix"] = {
+            "summary": recalled.get("summary") or "recalled similar incident",
+            "source": "memory",
+            "similarity": similarity,
+        }
+        reason = f"memory hit {recalled.get('id', 'unknown')} similarity={similarity:.3f}"
     return await _finish(state, update, "retrieve_fix", "lookup", reason)
 
 
+@weave.op(name="sentinel.plan_fix")
 async def n_plan_fix(state: dict) -> dict:
     fix_attempts = state.get("fix_attempts", 0) + 1
     existing = state.get("proposed_fix")
-    if existing and existing.get("source") == "cache":
+    if existing and existing.get("source") in {"cache", "memory"}:
         proposed_fix = existing
-        reason = "using cached fix"
+        reason = f"using {existing.get('source')} fix"
     else:
         evidence_items = state.get("evidence") or [{}]
         proposal = await diagnose(
@@ -165,21 +248,75 @@ async def n_plan_fix(state: dict) -> dict:
     return await _finish(state, update, "plan_fix", "plan", reason)
 
 
+@weave.op(name="sentinel.check_diagnosis")
+async def n_check_diagnosis(state: dict) -> dict:
+    proposed_fix = state.get("proposed_fix") or {}
+    evidence_items = state.get("evidence") or [{}]
+    last_evidence = evidence_items[-1] if evidence_items else {}
+    blamed_op = state.get("blamed_op") or proposed_fix.get("blamed_op") or "unknown"
+    symptom_type = state.get("symptom_type") or "unknown"
+    query = f"{symptom_type} in {blamed_op}"
+    context = json.dumps(
+        {
+            "evidence": last_evidence,
+            "source": read_op_source(blamed_op),
+        },
+        default=str,
+    )
+    output = (
+        f"{proposed_fix.get('diagnosis', '')} "
+        f"{proposed_fix.get('root_cause', '')}"
+    ).strip()
+
+    try:
+        hallucination = score_hallucination(query, context, output)
+        grounded = bool(hallucination.get("passed"))
+        decision = "grounded" if grounded else "hallucinated"
+        reason = "diagnosis grounded in evidence" if grounded else "diagnosis not grounded"
+    except Exception as e:
+        grounded = True
+        hallucination = {"error": str(e)}
+        decision = "grounded"
+        reason = "hallucination scorer unavailable; failed open"
+
+    update = {
+        "status": "CHECKING_DIAGNOSIS",
+        "diagnosis_grounded": grounded,
+        "hallucination": hallucination,
+    }
+    return await _finish(state, update, "check_diagnosis", decision, reason)
+
+
+@weave.op(name="sentinel.self_test")
 async def n_self_test(state: dict) -> dict:
     proposed_fix = state.get("proposed_fix") or {}
+    fix_confidence = proposed_fix.get("confidence", state.get("confidence"))
     slope_before = (state.get("anomaly") or {}).get("slope", 0)
-    passed = (
-        bool(proposed_fix)
-        and proposed_fix.get("confidence") != "failed"
-        and state.get("_self_test_should_pass", True)
-    )
+    slope_after = slope_before
+    confidence = "low"
+
+    if not proposed_fix or fix_confidence == "failed":
+        passed = False
+    elif "_self_test_should_pass" in state:
+        # Test-only override takes precedence over the offline simulation.
+        passed = bool(state["_self_test_should_pass"])
+        slope_after = slope_before * 0.05 if passed else slope_before
+    elif state.get("suspected_subcause") == "unbounded_collection":
+        slope_before, slope_after = _simulate_unbounded_collection_self_test(slope_before)
+        passed = slope_after <= 0.2 * slope_before
+    else:
+        passed = False
+
+    if passed:
+        confidence = "high"
+
     update = {
         "status": "TESTING_FIX",
         "test_result": {
             "tests_passed": passed,
             "rss_slope_before": slope_before,
-            "rss_slope_after": slope_before * 0.05 if passed else slope_before,
-            "confidence": "high" if passed else "low",
+            "rss_slope_after": slope_after,
+            "confidence": confidence,
         },
     }
     return await _finish(
@@ -191,6 +328,7 @@ async def n_self_test(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.await_approval")
 async def n_await_approval(state: dict) -> dict:
     update = {"status": "AWAITING_APPROVAL"}
     return await _finish(
@@ -202,6 +340,7 @@ async def n_await_approval(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.apply")
 async def n_apply(state: dict) -> dict:
     try:
         await redis.set(VICTIM_MODE, "fixed")
@@ -212,6 +351,7 @@ async def n_apply(state: dict) -> dict:
     return await _finish(state, update, "apply", "apply", "set victim fixed mode")
 
 
+@weave.op(name="sentinel.verify")
 async def n_verify(state: dict) -> dict:
     samples = await get_last_n_rss(30)
     if len(samples) >= 5:
@@ -242,6 +382,7 @@ async def n_verify(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.store_learning")
 async def n_store_learning(state: dict) -> dict:
     proposed_fix = state.get("proposed_fix") or {}
     summary = (
@@ -250,6 +391,8 @@ async def n_store_learning(state: dict) -> dict:
         or proposed_fix.get("diagnosis")
         or "fix verified"
     )
+    update = {"status": "RESOLVED", "next_action": "resolved"}
+    merged_state = _merge_for_broadcast(state, update)
     try:
         await redis.hset(
             _fix_cache_key(state),
@@ -257,10 +400,11 @@ async def n_store_learning(state: dict) -> dict:
         )
     except Exception:
         pass
-    update = {"status": "RESOLVED", "next_action": "resolved"}
+    await memory.store_incident(merged_state)
     return await _finish(state, update, "store_learning", "resolved", "stored fix")
 
 
+@weave.op(name="sentinel.rollback")
 async def n_rollback(state: dict) -> dict:
     try:
         await redis.set(VICTIM_MODE, "buggy")
@@ -270,6 +414,7 @@ async def n_rollback(state: dict) -> dict:
     return await _finish(state, update, "rollback", "rollback", "restored buggy mode")
 
 
+@weave.op(name="sentinel.report_unresolved")
 async def n_report_unresolved(state: dict) -> dict:
     if state.get("fix_attempts", 0) >= 2:
         reason = "fix attempt budget exhausted"

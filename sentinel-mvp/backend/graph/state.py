@@ -22,6 +22,8 @@ class IncidentState(TypedDict, total=False):
     attempted_routes: Annotated[list, operator.add]
     rejected_routes: Annotated[list, operator.add]
     proposed_fix: Optional[dict]
+    diagnosis_grounded: bool
+    hallucination: dict
     test_result: Optional[dict]
     verification: Optional[dict]
     next_action: Optional[str]

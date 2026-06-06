@@ -31,3 +31,4 @@ EVENTS_NARRATION = "events:narration"
 
 # Fix memory
 FIX_CACHE_PREFIX = "fix_cache"
+INCIDENT_VEC_PREFIX = "incident_vec"
