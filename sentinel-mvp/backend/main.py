@@ -9,6 +9,7 @@ to all three to drive the state machine; the SSE endpoint relays events:state.
 import asyncio
 import contextlib
 import json
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,16 +19,31 @@ from agents import attributor, detector, diagnostician
 from agents.supervisor import Supervisor
 from utils.redis_client import get_last_n_rss, iter_pubsub_messages, redis
 from utils.redis_keys import (
+    ATTRIB_INVOCATIONS,
+    ATTRIB_MEM,
     EVENTS_ANOMALY,
     EVENTS_ENRICHED,
     EVENTS_PROPOSAL,
     EVENTS_STATE,
     INCIDENT_CURRENT,
+    VICTIM_MODE,
 )
 from utils.weave_client import init_weave
 
+ORCHESTRATOR = os.environ.get("ORCHESTRATOR", "legacy")
+
 supervisor = Supervisor()
 _tasks: list[asyncio.Task] = []
+_graph_runner = None
+
+
+def _get_graph_runner():
+    global _graph_runner
+    if _graph_runner is None:
+        from graph.runner import GraphRunner
+
+        _graph_runner = GraphRunner()
+    return _graph_runner
 
 
 async def _anomaly_listener():
@@ -56,14 +72,24 @@ async def _proposal_listener():
         await supervisor.on_proposal(json.loads(msg["data"]))
 
 
+async def _graph_anomaly_listener():
+    async for msg in iter_pubsub_messages(EVENTS_ANOMALY):
+        if msg is None:
+            continue
+        await _get_graph_runner().start_from_anomaly(json.loads(msg["data"]))
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     init_weave()
-    await supervisor.reset()
     _tasks.append(asyncio.create_task(detector.detect_anomaly()))
-    _tasks.append(asyncio.create_task(_anomaly_listener()))
-    _tasks.append(asyncio.create_task(_enriched_listener()))
-    _tasks.append(asyncio.create_task(_proposal_listener()))
+    if ORCHESTRATOR == "graph":
+        _tasks.append(asyncio.create_task(_graph_anomaly_listener()))
+    else:
+        await supervisor.reset()
+        _tasks.append(asyncio.create_task(_anomaly_listener()))
+        _tasks.append(asyncio.create_task(_enriched_listener()))
+        _tasks.append(asyncio.create_task(_proposal_listener()))
     print("[backend] agents started")
     yield
     for t in _tasks:
@@ -138,6 +164,9 @@ async def sse_events():
 @app.post("/api/apply")
 async def apply_fix():
     try:
+        if ORCHESTRATOR == "graph":
+            result = await _get_graph_runner().approve_and_apply()
+            return {"status": "done", "verification": result.get("verification")}
         result = await supervisor.apply_fix()
         return {"status": "done", "verification": result}
     except ValueError as e:
@@ -152,5 +181,18 @@ async def force_detection():
 
 @app.post("/api/reset")
 async def reset():
+    if ORCHESTRATOR == "graph":
+        await _get_graph_runner().reset()
+        await redis.set(VICTIM_MODE, "buggy")
+        await redis.delete(ATTRIB_MEM, ATTRIB_INVOCATIONS)
+        await redis.hset(
+            INCIDENT_CURRENT,
+            mapping={"state": "IDLE", "data": json.dumps({})},
+        )
+        await redis.publish(
+            EVENTS_STATE,
+            json.dumps({"new_state": "IDLE", "incident": {}}),
+        )
+        return {"status": "reset"}
     await supervisor.reset()
     return {"status": "reset"}

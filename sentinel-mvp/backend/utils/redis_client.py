@@ -49,18 +49,30 @@ async def iter_pubsub_messages(channel: str, poll_timeout: float = 1.0):
 
 
 async def get_last_n_rss(n: int):
-    """Return up to the last n RSS samples, oldest-first.
+    """Return up to n RSS samples for the current victim PID, oldest-first.
 
-    Each sample: {"timestamp": float, "rss": int}.
+    Segmenting by PID stops a victim restart discontinuity from poisoning
+    RSS slope/R² calculations.
     """
-    # XREVRANGE gives newest-first; reverse to oldest-first.
-    entries = await redis.xrevrange(METRICS_RSS, count=n)
-    samples = []
-    for _id, fields in reversed(entries):
+    # XREVRANGE gives newest-first. Read extra entries so a short current run
+    # after restart can be found without letting older-pid samples leak in.
+    entries = await redis.xrevrange(METRICS_RSS, count=max(n * 4, 200))
+    unset = object()
+    current_pid = unset
+    samples = []  # newest-first while building
+    for _id, fields in entries:
         try:
-            samples.append(
-                {"timestamp": float(fields["timestamp"]), "rss": int(float(fields["rss"]))}
-            )
+            ts = float(fields["timestamp"])
+            rss = int(float(fields["rss"]))
         except (KeyError, ValueError):
             continue
+        pid = fields.get("pid")
+        if current_pid is unset:
+            current_pid = pid
+        if pid != current_pid:
+            break
+        samples.append({"timestamp": ts, "rss": rss})
+        if len(samples) >= n:
+            break
+    samples.reverse()
     return samples
