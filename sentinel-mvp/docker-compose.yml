@@ -1,0 +1,42 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  victim:
+    build: ./victim
+    restart: always  # so a mode-flip self-exit comes back in the new mode
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WEAVE_PROJECT=${WEAVE_PROJECT:-sentinel}
+      - VICTIM_MODE=${VICTIM_MODE:-buggy}
+      - DEMO_MODE=${DEMO_MODE:-true}
+
+  backend:
+    build: ./backend
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WEAVE_PROJECT=${WEAVE_PROJECT:-sentinel}
+      - DEMO_MODE=${DEMO_MODE:-true}
+    # Mount victim source so the Diagnostician can read the offending op's code.
+    volumes:
+      - ./victim:/victim_src:ro
