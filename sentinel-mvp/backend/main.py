@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 
 from agents import attributor, detector, diagnostician
 from agents.supervisor import Supervisor
-from utils.redis_client import get_last_n_rss, redis
+from utils.redis_client import get_last_n_rss, iter_pubsub_messages, redis
 from utils.redis_keys import (
     EVENTS_ANOMALY,
     EVENTS_ENRICHED,
@@ -32,10 +32,8 @@ _tasks: list[asyncio.Task] = []
 
 async def _anomaly_listener():
     """events:anomaly -> Supervisor + kick off attribution chain."""
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(EVENTS_ANOMALY)
-    async for msg in pubsub.listen():
-        if msg["type"] != "message":
+    async for msg in iter_pubsub_messages(EVENTS_ANOMALY):
+        if msg is None:
             continue
         data = json.loads(msg["data"])
         await supervisor.on_anomaly(data)
@@ -45,19 +43,15 @@ async def _anomaly_listener():
 
 
 async def _enriched_listener():
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(EVENTS_ENRICHED)
-    async for msg in pubsub.listen():
-        if msg["type"] != "message":
+    async for msg in iter_pubsub_messages(EVENTS_ENRICHED):
+        if msg is None:
             continue
         await supervisor.on_enriched(json.loads(msg["data"]))
 
 
 async def _proposal_listener():
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(EVENTS_PROPOSAL)
-    async for msg in pubsub.listen():
-        if msg["type"] != "message":
+    async for msg in iter_pubsub_messages(EVENTS_PROPOSAL):
+        if msg is None:
             continue
         await supervisor.on_proposal(json.loads(msg["data"]))
 
@@ -113,8 +107,6 @@ async def get_incident():
 @app.get("/api/events")
 async def sse_events():
     async def event_stream():
-        pubsub = redis.pubsub()
-        await pubsub.subscribe(EVENTS_STATE)
         # Send current state immediately so a fresh client is in sync.
         state = await redis.hget(INCIDENT_CURRENT, "state")
         data = await redis.hget(INCIDENT_CURRENT, "data")
@@ -128,12 +120,13 @@ async def sse_events():
             )
             + "\n\n"
         )
-        try:
-            async for msg in pubsub.listen():
-                if msg["type"] == "message":
-                    yield f"data: {msg['data']}\n\n"
-        finally:
-            await pubsub.unsubscribe(EVENTS_STATE)
+        # iter_pubsub_messages yields None on idle ticks; emit an SSE comment
+        # heartbeat so the connection stays warm and never dies on a quiet channel.
+        async for msg in iter_pubsub_messages(EVENTS_STATE):
+            if msg is None:
+                yield ": keepalive\n\n"
+                continue
+            yield f"data: {msg['data']}\n\n"
 
     return StreamingResponse(
         event_stream(),
