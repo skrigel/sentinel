@@ -13,7 +13,12 @@ import weave
 
 from agents.attributor import attribute_anomaly, attribute_cpu
 from agents.diagnostician import diagnose, fix_code_diff, read_op_source
-from utils.redis_client import get_last_n_looplag, get_last_n_rss, redis
+from utils.redis_client import (
+    get_last_n_looplag,
+    get_last_n_procstat,
+    get_last_n_rss,
+    redis,
+)
 from utils.redis_keys import (
     ATTRIB_CPU,
     ATTRIB_INVOCATIONS,
@@ -24,6 +29,7 @@ from utils.redis_keys import (
 from utils.stats import linregress
 
 from .broadcast import broadcast, narrate
+from .fingerprint import classify_subcause
 from . import memory
 from .state import RECOVERY_REDUCTION_TARGET
 
@@ -134,6 +140,73 @@ def _simulate_unbounded_collection_self_test(
     return unbounded_slope * scale, windowed_slope * scale
 
 
+def _series_net(samples: list[dict], field: str):
+    if not samples:
+        return None
+    values = []
+    for sample in samples:
+        value = sample.get(field)
+        if value is None:
+            return None
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            return None
+    if not values:
+        return None
+    return values[-1] - values[0]
+
+
+def _mean_present(samples: list[dict], field: str):
+    values = []
+    for sample in samples:
+        value = sample.get(field)
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return sum(values) / len(values) if values else None
+
+
+async def _procstat_signals():
+    try:
+        procstat = await get_last_n_procstat(30)
+    except Exception:
+        procstat = []
+    if not procstat:
+        return {
+            "uss_net": None,
+            "fds_net": None,
+            "threads_net": None,
+            "cpu_pct_mean": None,
+        }
+    return {
+        "uss_net": _series_net(procstat, "uss"),
+        "fds_net": _series_net(procstat, "num_fds"),
+        "threads_net": _series_net(procstat, "num_threads"),
+        "cpu_pct_mean": _mean_present(procstat, "cpu_pct"),
+    }
+
+
+async def _loop_lag_mean(state: dict):
+    anomaly = state.get("anomaly") or {}
+    lag_mean = anomaly.get("lag_mean")
+    if lag_mean is not None:
+        try:
+            return float(lag_mean)
+        except (TypeError, ValueError):
+            return None
+    if state.get("symptom_type") != "cpu_hotpath":
+        return None
+    try:
+        samples = await get_last_n_looplag(10)
+    except Exception:
+        samples = []
+    return _mean_present(samples, "lag")
+
+
 @weave.op(name="sentinel.triage")
 async def n_triage(state: dict) -> dict:
     anomaly = state.get("anomaly") or {}
@@ -217,19 +290,26 @@ async def n_evidence_collector(state: dict) -> dict:
 
 @weave.op(name="sentinel.classify_cause")
 async def n_classify_cause(state: dict) -> dict:
-    if state.get("symptom_type") == "memory_leak" and state.get("blamed_op"):
-        subcause = "unbounded_collection"
-        confidence = 0.9
-    elif state.get("symptom_type") == "cpu_hotpath" and state.get("blamed_op"):
-        subcause = "sync_io_in_async_loop"
-        confidence = 0.9
-    else:
-        subcause = "unknown"
-        confidence = 0.3
+    procstat = await _procstat_signals()
+    signals = {
+        "blamed_op": state.get("blamed_op"),
+        "tracemalloc_pct": state.get("pct_explained"),
+        **procstat,
+        "loop_lag_mean": await _loop_lag_mean(state),
+    }
+    result = classify_subcause(state.get("symptom_type"), signals)
+    subcause = result["subcause"]
+    confidence = result["confidence"]
+    fingerprint = {
+        "type": "fingerprint",
+        **result["signals_summary"],
+        "matched_rule": result["matched_rule"],
+    }
     update = {
         "status": "CLASSIFYING_CAUSE",
         "suspected_subcause": subcause,
         "confidence": confidence,
+        "evidence": [fingerprint],
     }
     return await _finish(
         state,

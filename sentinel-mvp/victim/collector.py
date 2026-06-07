@@ -11,9 +11,10 @@ import time
 
 import psutil
 
-from redis_keys import METRICS_LOOPLAG, METRICS_MAXLEN, METRICS_RSS
+from redis_keys import METRICS_LOOPLAG, METRICS_MAXLEN, METRICS_PROCSTAT, METRICS_RSS
 
 SAMPLE_INTERVAL_S = 2.0
+USS_EVERY_N = 5
 
 
 async def measure_loop_lag() -> float:
@@ -25,12 +26,61 @@ async def measure_loop_lag() -> float:
     return max(0.0, (actual - requested) * 1000.0)
 
 
+def _safe_cpu_percent(proc):
+    try:
+        return proc.cpu_percent()
+    except Exception:
+        return None
+
+
+def _safe_num_threads(proc):
+    try:
+        return proc.num_threads()
+    except Exception:
+        return None
+
+
+def _safe_num_fds(proc):
+    try:
+        return proc.num_fds()
+    except AttributeError:
+        try:
+            return proc.num_handles()
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _safe_uss(proc):
+    try:
+        return proc.memory_full_info().uss
+    except Exception:
+        return None
+
+
+def _stream_value(value):
+    return "" if value is None else value
+
+
 async def collector_task(redis_client):
     proc = psutil.Process(os.getpid())
+    cycle = 0
+    last_uss = None
     while True:
         rss = proc.memory_info().rss
         lag = await measure_loop_lag()
         ts = time.time()
+        if cycle % USS_EVERY_N == 0:
+            last_uss = _safe_uss(proc)
+        procstat = {
+            "timestamp": ts,
+            "pid": proc.pid,
+            "uss": _stream_value(last_uss),
+            "cpu_pct": _stream_value(_safe_cpu_percent(proc)),
+            "num_fds": _stream_value(_safe_num_fds(proc)),
+            "num_threads": _stream_value(_safe_num_threads(proc)),
+        }
 
         try:
             await redis_client.xadd(
@@ -50,4 +100,15 @@ async def collector_task(redis_client):
             # Docker restarts us (restart: always).
             raise
 
+        try:
+            await redis_client.xadd(
+                METRICS_PROCSTAT,
+                procstat,
+                maxlen=METRICS_MAXLEN,
+                approximate=True,
+            )
+        except Exception:
+            pass
+
+        cycle += 1
         await asyncio.sleep(SAMPLE_INTERVAL_S)

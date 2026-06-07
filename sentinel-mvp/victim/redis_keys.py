@@ -7,6 +7,7 @@ contract. Never hardcode key strings elsewhere.
 # Metric streams (time-series, XADD with MAXLEN)
 METRICS_RSS = "metrics:rss"
 METRICS_LOOPLAG = "metrics:looplag"
+METRICS_PROCSTAT = "metrics:procstat"
 METRICS_MAXLEN = 2000
 
 # Cumulative per-op attribution

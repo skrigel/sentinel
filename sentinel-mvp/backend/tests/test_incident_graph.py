@@ -55,6 +55,29 @@ def no_redis_broadcast(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_classify_cause_degrades_to_legacy_when_procstat_absent(monkeypatch):
+    async def fake_get_last_n_procstat(_n):
+        return []
+
+    monkeypatch.setattr(graph_nodes, "get_last_n_procstat", fake_get_last_n_procstat)
+
+    update = await graph_nodes.n_classify_cause(
+        {
+            "symptom_type": "memory_leak",
+            "blamed_op": "process_batch",
+            "pct_explained": 92.0,
+            "evidence": [],
+            "attempted_routes": [],
+            "rejected_routes": [],
+        }
+    )
+
+    assert update["suspected_subcause"] == "unbounded_collection"
+    assert update["confidence"] == 0.9
+    assert update["evidence"][0]["matched_rule"] == "legacy_memory"
+
+
+@pytest.mark.asyncio
 async def test_happy_path(monkeypatch):
     async def fake_attribute_anomaly(anomaly):
         return {
