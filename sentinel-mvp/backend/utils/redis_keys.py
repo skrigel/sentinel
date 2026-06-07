@@ -23,6 +23,8 @@ TIMELINE_MAXLEN = 500
 
 # Control flags
 VICTIM_MODE = "victim:mode"  # String: "buggy" | "fixed"
+VICTIM_AGENT_ID = "victim:agent_id"  # String: active monitored agent id
+VICTIM_AGENT_VERSION = "victim:agent_version"  # String: bumped to restart victim
 SETTINGS_AUTO_APPROVE = "settings:auto_approve"  # String: "1" | "0"
 
 # Pub/sub channels

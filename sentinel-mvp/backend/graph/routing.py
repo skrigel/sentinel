@@ -10,6 +10,11 @@ def route_after_triage(state) -> str:
 
 
 def route_after_investigation(state) -> str:
+    evidence = state.get("evidence") or []
+    latest = evidence[-1] if evidence else {}
+    if state.get("blamed_op") and latest.get("configured_target"):
+        return "classify"
+
     pct = state.get("pct_explained", 0.0)
     if pct > 60:
         return "classify"

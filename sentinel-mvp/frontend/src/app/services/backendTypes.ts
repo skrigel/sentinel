@@ -56,12 +56,16 @@ export interface ProposedFix {
   root_cause?: string;
   fix_strategy?: string;
   confidence?: 'high' | 'medium' | 'low' | 'failed' | string;
+  agent_id?: string;
+  agent_name?: string;
+  entry_point?: string;
   blamed_op?: string;
   evidence?: AttributionEvidence;
   eval?: {
-    accuracy: number;
-    mentioned_correct_op: boolean;
-    identified_cause: boolean;
+    accuracy: number | null;
+    mentioned_correct_op: boolean | null;
+    identified_cause: boolean | null;
+    skipped?: string;
   };
   // cache/memory recall fields
   summary?: string;
@@ -123,6 +127,27 @@ export interface IncidentResponse {
 export interface RssSample {
   timestamp: number; // seconds
   rss: number; // bytes
+}
+
+/** One uploaded/default monitor target from GET /api/agents. */
+export interface AgentRecord {
+  id: string;
+  display_name: string;
+  filename: string;
+  entry_point: string;
+  runtime_status?: 'running' | 'ready' | 'source_only' | string;
+  runtime_message?: string;
+  content_type?: string | null;
+  source_path?: string | null;
+  monitored: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Per-agent RSS samples from GET /api/agents/metrics. */
+export interface AgentMetricSeries {
+  agent: AgentRecord;
+  samples: RssSample[];
 }
 
 /** One per-node agent activity event from GET /api/timeline (oldest-first). */

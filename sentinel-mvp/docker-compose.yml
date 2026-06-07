@@ -22,6 +22,9 @@ services:
       - WEAVE_PROJECT=${WEAVE_PROJECT:-sentinel}
       - VICTIM_MODE=${VICTIM_MODE:-buggy}
       - DEMO_MODE=${DEMO_MODE:-true}
+      - ACTIVE_AGENT_PATH=/data/active_agent.py
+    volumes:
+      - sentinel_data:/data
 
   backend:
     build: ./backend

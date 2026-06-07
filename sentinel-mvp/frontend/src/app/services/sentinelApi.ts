@@ -2,6 +2,8 @@ import { ActionType, SentinelAction, SentinelPlan, SentinelState, ProposedChange
 import { Agent, Intervention, MetricDataPoint } from '../types';
 import {
   ApplyResponse,
+  AgentMetricSeries,
+  AgentRecord,
   IncidentDocument,
   IncidentResponse,
   IncidentStatus,
@@ -30,6 +32,17 @@ async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   return res.json() as Promise<T>;
+}
+
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: unknown; error?: unknown };
+    if (typeof body.detail === 'string') return body.detail;
+    if (typeof body.error === 'string') return body.error;
+  } catch {
+    // Keep the fallback below.
+  }
+  return fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +210,8 @@ export function buildProposedChanges(inc: IncidentDocument | null): ProposedChan
     {
       id: inc.incident_id ?? 'pending',
       timestamp: (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000,
-      agentId: VICTIM_AGENT_ID,
-      agentName: VICTIM_AGENT_NAME,
+      agentId: fix.agent_id ?? VICTIM_AGENT_ID,
+      agentName: fix.agent_name ?? VICTIM_AGENT_NAME,
       issue: inc.suspected_subcause || inc.symptom_type || 'anomaly',
       severity: severityFromAnomaly(inc),
       proposedFix: fix.fix_strategy || fix.summary || 'Apply pre-written fixed mode',
@@ -250,8 +263,8 @@ export function incidentToIntervention(inc: IncidentDocument): Intervention {
   return {
     id: inc.incident_id ?? 'inc',
     timestamp: (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000,
-    agentId: VICTIM_AGENT_ID,
-    agentName: VICTIM_AGENT_NAME,
+    agentId: fix?.agent_id ?? VICTIM_AGENT_ID,
+    agentName: fix?.agent_name ?? VICTIM_AGENT_NAME,
     type: 'memory',
     severity: severityFromAnomaly(inc),
     issue: inc.suspected_subcause || inc.symptom_type || 'anomaly',
@@ -315,6 +328,61 @@ export async function fetchMemoryMetrics(): Promise<MetricDataPoint[]> {
   return samples.map((s) => ({
     timestamp: s.timestamp * 1000,
     value: s.rss / 1024 / 1024,
+  }));
+}
+
+export interface AgentMemorySeries {
+  agent: AgentRecord;
+  data: MetricDataPoint[];
+}
+
+export async function fetchAgents(): Promise<AgentRecord[]> {
+  return getJson<AgentRecord[]>('/api/agents');
+}
+
+export async function uploadAgents(
+  files: File[],
+  entryPoint: string,
+  displayName: string,
+): Promise<AgentRecord[]> {
+  const body = new FormData();
+  files.forEach((file) => body.append('files', file));
+  body.append('entry_point', entryPoint);
+  body.append('display_name', displayName);
+  const res = await fetch(`${API_BASE}/api/agents`, {
+    method: 'POST',
+    body,
+  });
+  if (!res.ok) throw new Error(await errorMessage(res, `Upload failed (${res.status})`));
+  return res.json() as Promise<AgentRecord[]>;
+}
+
+export async function updateAgent(
+  agentId: string,
+  body: { display_name?: string; monitored?: boolean; entry_point?: string },
+): Promise<AgentRecord> {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res, `Agent update failed (${res.status})`));
+  return res.json() as Promise<AgentRecord>;
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await errorMessage(res, `Delete failed (${res.status})`));
+}
+
+export async function fetchAgentMemoryMetrics(): Promise<AgentMemorySeries[]> {
+  const series = await getJson<AgentMetricSeries[]>('/api/agents/metrics');
+  return series.map(({ agent, samples }) => ({
+    agent,
+    data: samples.map((s) => ({
+      timestamp: s.timestamp * 1000,
+      value: s.rss / 1024 / 1024,
+    })),
   }));
 }
 

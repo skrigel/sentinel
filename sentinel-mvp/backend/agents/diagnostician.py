@@ -6,45 +6,94 @@ known root cause.
 """
 
 import asyncio
+import ast
 import json
 import os
 import re
 
 import weave
 
+from utils.agent_store import (
+    DEFAULT_ENTRY_POINT,
+    get_agent_source_sync,
+    get_primary_monitored_agent_sync,
+)
 from utils.redis_client import redis
 from utils.redis_keys import EVENTS_PROPOSAL
-
-VICTIM_SRC = os.environ.get("VICTIM_SRC_DIR", "/victim_src")
-OPS_FILE = os.path.join(VICTIM_SRC, "ops.py")
 
 GROUND_TRUTH = {"expected_op": "process_batch", "expected_cause": "unbounded list"}
 
 
-def read_op_source(op_name: str) -> str:
-    """Extract the source of an async op from the mounted victim ops.py."""
+def _extract_python_function_source(src: str, op_name: str) -> str | None:
     try:
-        with open(OPS_FILE, "r") as f:
-            src = f.read()
-    except OSError:
-        return f"# source unavailable for {op_name}"
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
 
-    # Grab from `async def <op_name>` to the next top-level dedent (next def or EOF).
-    pattern = rf"(async def {re.escape(op_name)}\(.*?)(?=\n    @weave|\n    async def |\nclass |\Z)"
-    m = re.search(pattern, src, re.DOTALL)
-    if m:
-        return m.group(1).rstrip()
+    lines = src.splitlines()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != op_name:
+            continue
+
+        start = node.lineno
+        if node.decorator_list:
+            start = min(decorator.lineno for decorator in node.decorator_list)
+        end = getattr(node, "end_lineno", None)
+        if end is None:
+            return None
+        return "\n".join(lines[start - 1 : end]).rstrip()
+    return None
+
+
+def _extract_op_source(src: str, op_name: str) -> str:
+    """Extract a function body from source, falling back to the full module."""
+
+    python_source = _extract_python_function_source(src, op_name)
+    if python_source:
+        return python_source
+
+    # Fallback for partial Python snippets and simple JS/TS entry points.
+    escaped = re.escape(op_name)
+    patterns = [
+        rf"^([ \t]*(?:@[^\n]+\n[ \t]*)*(?:async\s+)?def\s+{escaped}\s*\(.*?)(?=^[ \t]*(?:@[^\n]+\n[ \t]*)*(?:async\s+)?def\s+\w+\s*\(|^[ \t]*class\s+\w+|\Z)",
+        rf"^([ \t]*(?:export\s+)?(?:async\s+)?function\s+{escaped}\s*\(.*?)(?=^[ \t]*(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(|^[ \t]*(?:export\s+)?(?:const|let|var)\s+\w+\s*=|^[ \t]*class\s+\w+|\Z)",
+        rf"^([ \t]*(?:export\s+)?(?:const|let|var)\s+{escaped}\s*=\s*(?:async\s*)?\(?.*?)(?=^[ \t]*(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(|^[ \t]*(?:export\s+)?(?:const|let|var)\s+\w+\s*=|^[ \t]*class\s+\w+|\Z)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, src, re.DOTALL | re.MULTILINE)
+        if m:
+            return m.group(1).rstrip()
     return src  # fall back to the whole module
 
 
-def fix_code_diff(blamed_op: str) -> dict | None:
+def read_op_source(op_name: str, agent_id: str | None = None) -> str:
+    """Extract the blamed op source from the selected monitored agent."""
+    agent = None
+    try:
+        if agent_id:
+            agent, src = get_agent_source_sync(agent_id)
+        else:
+            agent = get_primary_monitored_agent_sync()
+            agent, src = get_agent_source_sync(agent["id"])
+    except Exception as e:
+        return f"# source unavailable for {op_name}: {e}"
+
+    if not src:
+        name = agent.get("display_name") if agent else agent_id
+        return f"# source unavailable for {op_name} in {name or 'selected agent'}"
+    return _extract_op_source(src, op_name)
+
+
+def fix_code_diff(blamed_op: str, filename: str = "victim/ops.py") -> dict | None:
     """The scoped memory beat's concrete fix: unbounded ``conversation_history``
     -> sliding window K=8. Applying the fix flips the victim to the windowed
     branch, so this before/after is the real change the system enacts."""
     if blamed_op != "process_batch":
         return None
     return {
-        "file": "victim/ops.py",
+        "file": filename,
         "line": 61,
         "before": (
             "# BUG: appended forever, never released -> unbounded growth.\n"
@@ -61,7 +110,9 @@ def fix_code_diff(blamed_op: str) -> dict | None:
 @weave.op()
 def evaluate_diagnosis(proposal: dict, ground_truth: dict) -> dict:
     """Weave eval: did the LLM identify the right op and mechanism?"""
-    diag_text = (proposal.get("diagnosis", "") + " " + proposal.get("root_cause", "")).lower()
+    diag_text = (
+        proposal.get("diagnosis", "") + " " + proposal.get("root_cause", "")
+    ).lower()
     mentioned_op = ground_truth["expected_op"] in diag_text
     identified_cause = ground_truth["expected_cause"] in diag_text
     score = 0.5 * mentioned_op + 0.5 * identified_cause
@@ -129,9 +180,20 @@ Provide: (1) what is happening, (2) why (root cause), (3) how to fix it,
 
 @weave.op()
 async def diagnose(enriched: dict) -> dict:
-    blamed_op = enriched.get("blamed_op") or "process_batch"
     evidence = enriched.get("evidence", {})
-    source = read_op_source(blamed_op)
+    agent_id = enriched.get("agent_id")
+    agent = None
+    try:
+        if agent_id:
+            agent, _ = get_agent_source_sync(agent_id)
+        if not agent:
+            agent = get_primary_monitored_agent_sync()
+            agent_id = agent["id"]
+    except Exception:
+        agent = None
+    entry_point = (agent or {}).get("entry_point") or DEFAULT_ENTRY_POINT
+    blamed_op = enriched.get("blamed_op") or entry_point
+    source = read_op_source(blamed_op, agent_id=agent_id)
 
     proposal = None
     last_err = None
@@ -153,11 +215,27 @@ async def diagnose(enriched: dict) -> dict:
         }
 
     proposal["blamed_op"] = blamed_op
+    proposal["entry_point"] = entry_point
+    proposal["agent_id"] = agent_id
+    proposal["agent_name"] = agent.get("display_name") if agent else None
     proposal["evidence"] = evidence
-    proposal["code"] = fix_code_diff(blamed_op)
-    proposal["eval"] = evaluate_diagnosis(proposal, GROUND_TRUTH)
+    proposal["code"] = fix_code_diff(
+        blamed_op, agent.get("filename", "victim/ops.py") if agent else "victim/ops.py"
+    )
+    if blamed_op == GROUND_TRUTH["expected_op"]:
+        proposal["eval"] = evaluate_diagnosis(proposal, GROUND_TRUTH)
+    else:
+        proposal["eval"] = {
+            "accuracy": None,
+            "mentioned_correct_op": None,
+            "identified_cause": None,
+            "skipped": "No demo ground truth configured for selected entry point.",
+        }
 
     await redis.publish(EVENTS_PROPOSAL, json.dumps(proposal))
-    print(f"[diagnostician] proposal published (conf={proposal['confidence']}, "
-          f"eval acc={proposal['eval']['accuracy']})")
+    eval_accuracy = proposal["eval"].get("accuracy")
+    print(
+        f"[diagnostician] proposal published (conf={proposal['confidence']}, "
+        f"eval acc={eval_accuracy if eval_accuracy is not None else 'skipped'})"
+    )
     return proposal

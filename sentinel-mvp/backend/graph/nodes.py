@@ -36,7 +36,7 @@ _VERIFY_WAIT_S = float(os.environ.get("VERIFY_WAIT_S", "16"))
 # On stage the LLM-judge hallucination gate is too strict (it flags correct but
 # generically-worded diagnoses), so the demo bypasses it. The strict gate still
 # runs in normal mode.
-DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() == "true"
+DEMO_MODE = os.environ.get("DEMO_MODE", "false").lower() == "true"
 
 
 def _merge_for_broadcast(state: dict, update: dict) -> dict:
@@ -158,8 +158,13 @@ async def n_memory_investigate(state: dict) -> dict:
     evidence = enriched.get("evidence") or {}
     blamed_op = enriched.get("blamed_op")
     pct_explained = evidence.get("pct_of_growth_explained", 0.0)
+    if evidence.get("configured_target"):
+        reason = f"using configured entry point {blamed_op or 'unknown'}"
+    else:
+        reason = f"{blamed_op or 'none'} explains {pct_explained:.1f}% of growth"
     update = {
         "status": "INVESTIGATING",
+        "agent_id": enriched.get("agent_id") or (state.get("anomaly") or {}).get("agent_id"),
         "blamed_op": blamed_op,
         "confidence": _confidence_score(enriched.get("confidence")),
         "pct_explained": pct_explained,
@@ -171,7 +176,7 @@ async def n_memory_investigate(state: dict) -> dict:
         update,
         "memory_investigate",
         "attribute",
-        f"{blamed_op or 'none'} explains {pct_explained:.1f}% of growth",
+        reason,
     )
 
 
@@ -251,6 +256,7 @@ async def n_plan_fix(state: dict) -> dict:
         proposal = await diagnose(
             {
                 "blamed_op": state.get("blamed_op"),
+                "agent_id": state.get("agent_id"),
                 "evidence": evidence_items[-1] if evidence_items else {},
                 "type": state.get("symptom_type"),
             }
@@ -282,7 +288,7 @@ async def n_check_diagnosis(state: dict) -> dict:
     context = json.dumps(
         {
             "evidence": last_evidence,
-            "source": read_op_source(blamed_op),
+            "source": read_op_source(blamed_op, proposed_fix.get("agent_id") or state.get("agent_id")),
         },
         default=str,
     )

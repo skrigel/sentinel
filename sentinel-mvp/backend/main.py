@@ -8,10 +8,13 @@ to all three to drive the state machine; the SSE endpoint relays events:state.
 
 import asyncio
 import contextlib
+import io
 import json
 import os
+import time
+import zipfile
 
-from fastapi import FastAPI
+from fastapi import File, FastAPI, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -19,7 +22,22 @@ from pydantic import BaseModel
 from agents import attributor, detector, diagnostician
 from agents.supervisor import Supervisor
 from utils.activity_db import fetch_activity, fetch_incidents, init_activity_db
-from utils.redis_client import get_last_n_rss, iter_pubsub_messages, redis
+from utils.agent_store import (
+    DEFAULT_AGENT_ID,
+    create_agent,
+    delete_agent,
+    get_agent_source,
+    get_primary_monitored_agent,
+    init_agent_store,
+    list_agents,
+    update_agent,
+)
+from utils.redis_client import (
+    get_last_n_rss,
+    get_last_n_rss_by_agent,
+    iter_pubsub_messages,
+    redis,
+)
 from utils.redis_keys import (
     ATTRIB_INVOCATIONS,
     ATTRIB_MEM,
@@ -30,12 +48,15 @@ from utils.redis_keys import (
     INCIDENT_CURRENT,
     SETTINGS_AUTO_APPROVE,
     TIMELINE_EVENTS,
+    VICTIM_AGENT_ID,
+    VICTIM_AGENT_VERSION,
     VICTIM_MODE,
 )
 from utils.weave_client import init_weave
 
 # init_weave()
 ORCHESTRATOR = os.environ.get("ORCHESTRATOR", "legacy")
+ACTIVE_AGENT_PATH = os.environ.get("ACTIVE_AGENT_PATH", "/data/active_agent.py")
 
 supervisor = Supervisor()
 _tasks: list[asyncio.Task] = []
@@ -57,6 +78,117 @@ async def _auto_approve_enabled() -> bool:
         return (await redis.get(SETTINGS_AUTO_APPROVE)) == "1"
     except Exception:
         return False
+
+
+class AgentUpdate(BaseModel):
+    display_name: str | None = None
+    monitored: bool | None = None
+    entry_point: str | None = None
+
+
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".md",
+}
+
+
+def _source_text_from_upload(filename: str, raw: bytes) -> str:
+    if filename.lower().endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                parts = []
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = info.filename
+                    if "__pycache__" in name or "node_modules/" in name:
+                        continue
+                    if os.path.splitext(name)[1].lower() not in SOURCE_EXTENSIONS:
+                        continue
+                    try:
+                        text = zf.read(info).decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    parts.append(f"# file: {name}\n{text.rstrip()}\n")
+        except zipfile.BadZipFile as e:
+            raise HTTPException(status_code=400, detail=f"{filename} is not a valid zip") from e
+        if not parts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{filename} did not contain any UTF-8 source files",
+            )
+        return "\n".join(parts)
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{filename or 'agent'} is not valid UTF-8 source",
+        ) from e
+
+
+def _is_runnable_victim_agent(source_text: str | None) -> bool:
+    return bool(source_text and "def _make_op" in source_text)
+
+
+def _with_runtime_status(agent: dict, runnable: bool, active: bool) -> dict:
+    if active:
+        return {
+            **agent,
+            "runtime_status": "running",
+            "runtime_message": "Running in the victim loop.",
+        }
+    if runnable:
+        return {
+            **agent,
+            "runtime_status": "ready",
+            "runtime_message": "Ready to run when selected.",
+        }
+    return {
+        **agent,
+        "runtime_status": "source_only",
+        "runtime_message": (
+            "Uploaded for source diagnosis only. To run in the victim loop, "
+            "the file must expose _make_op(redis_client)."
+        ),
+    }
+
+
+async def _activate_agent_runtime(agent_id: str) -> None:
+    agent, source_text = await get_agent_source(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    os.makedirs(os.path.dirname(ACTIVE_AGENT_PATH), exist_ok=True)
+    if agent["id"] == DEFAULT_AGENT_ID:
+        try:
+            os.remove(ACTIVE_AGENT_PATH)
+        except OSError:
+            pass
+    else:
+        if not _is_runnable_victim_agent(source_text):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Selected agent cannot run as the victim loop. Upload a Python "
+                    "source file exposing _make_op(redis_client), like the original victim."
+                ),
+            )
+        tmp_path = f"{ACTIVE_AGENT_PATH}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(source_text)
+        os.replace(tmp_path, ACTIVE_AGENT_PATH)
+
+    await redis.set(VICTIM_AGENT_ID, agent["id"])
+    await redis.set(VICTIM_AGENT_VERSION, f"{agent['id']}:{time.time()}")
+    await redis.set(VICTIM_MODE, "buggy")
+    await redis.delete(ATTRIB_MEM, ATTRIB_INVOCATIONS)
 
 
 # After a successful fix, hold RESOLVED briefly so the UI can show recovery, then
@@ -135,6 +267,7 @@ async def _graph_anomaly_listener():
 async def lifespan(app: FastAPI):
     init_weave()
     await init_activity_db()
+    await init_agent_store()
     _tasks.append(asyncio.create_task(detector.detect_anomaly()))
     if ORCHESTRATOR == "graph":
         _tasks.append(asyncio.create_task(_graph_anomaly_listener()))
@@ -198,6 +331,91 @@ async def get_timeline(n: int = 100):
     return events
 
 
+@app.get("/api/agents")
+async def get_agents():
+    """All uploaded/default agents and whether Sentinel should monitor them."""
+    return await list_agents()
+
+
+@app.post("/api/agents")
+async def upload_agents(
+    files: list[UploadFile] = File(...),
+    entry_point: str = Form(...),
+    display_name: str | None = Form(None),
+):
+    """Upload one or more agent source files/bundles and mark them monitored."""
+    agents = []
+    for file in files:
+        raw = await file.read()
+        filename = file.filename or "agent.py"
+        source_text = _source_text_from_upload(filename, raw)
+        runnable = _is_runnable_victim_agent(source_text)
+        agent = await create_agent(
+            filename,
+            source_text,
+            file.content_type,
+            entry_point,
+            display_name,
+            monitored=runnable,
+        )
+        if runnable:
+            await _activate_agent_runtime(agent["id"])
+        else:
+            primary = await get_primary_monitored_agent()
+            if not primary or primary["id"] == agent["id"]:
+                await update_agent(DEFAULT_AGENT_ID, monitored=True)
+                primary = await get_primary_monitored_agent()
+            if primary:
+                await _activate_agent_runtime(primary["id"])
+        agents.append(_with_runtime_status(agent, runnable, runnable))
+    return agents
+
+
+@app.patch("/api/agents/{agent_id}")
+async def patch_agent(agent_id: str, body: AgentUpdate):
+    agent = await update_agent(
+        agent_id,
+        display_name=body.display_name,
+        monitored=body.monitored,
+        entry_point=body.entry_point,
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.get("monitored"):
+        await _activate_agent_runtime(agent["id"])
+    return agent
+
+
+@app.delete("/api/agents/{agent_id}")
+async def remove_agent(agent_id: str):
+    if not await delete_agent(agent_id):
+        raise HTTPException(
+            status_code=404, detail="Agent not found or cannot be deleted"
+        )
+    primary = await get_primary_monitored_agent()
+    if primary:
+        await _activate_agent_runtime(primary["id"])
+    return {"status": "deleted"}
+
+
+@app.get("/api/agents/metrics")
+async def get_agent_metrics(n: int = 100):
+    """Last RSS samples grouped by monitored agent id."""
+    agents = await list_agents()
+    monitored_agents = [agent for agent in agents if agent.get("monitored")]
+    primary_agent = await get_primary_monitored_agent()
+    agent_ids = [agent["id"] for agent in monitored_agents]
+    grouped = await get_last_n_rss_by_agent(
+        n, agent_ids, legacy_agent_id=primary_agent["id"]
+    )
+    return [
+        {
+            "agent": agent,
+            "samples": grouped.get(agent["id"], []),
+        }
+        for agent in monitored_agents
+    ]
+
 @app.get("/api/activity")
 async def get_activity(limit: int = 300, offset: int = 0):
     """Durable, cross-incident agent activity (SQLite), oldest-first per page."""
@@ -205,7 +423,7 @@ async def get_activity(limit: int = 300, offset: int = 0):
 
 
 @app.get("/api/interventions")
-async def get_interventions(limit: int = 50):
+async def get_interventions(limit: int = 50, agent_id: str | None = None):
     """Durable per-incident snapshots (newest-first) for the Agent Activity feed."""
     return await fetch_incidents(limit=limit)
 

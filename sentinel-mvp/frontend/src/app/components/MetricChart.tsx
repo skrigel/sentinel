@@ -5,9 +5,10 @@ interface MetricChartProps {
   data: MetricDataPoint[];
   type: MetricType;
   status: 'healthy' | 'warning' | 'critical' | 'recovering';
+  label?: string;
 }
 
-export function MetricChart({ data, type, status }: MetricChartProps) {
+export function MetricChart({ data, type, status, label }: MetricChartProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString('en-US', {
@@ -37,7 +38,7 @@ export function MetricChart({ data, type, status }: MetricChartProps) {
       <div className="flex items-baseline justify-between">
         <div>
           <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-            {type === 'memory' ? 'Memory' : 'CPU'}
+            {label ?? (type === 'memory' ? 'Memory' : 'CPU')}
           </div>
           <div className="text-2xl font-light text-gray-900 mt-1">
             {currentValue.toFixed(1)}

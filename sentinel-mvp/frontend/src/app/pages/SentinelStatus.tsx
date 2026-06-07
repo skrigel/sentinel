@@ -46,12 +46,12 @@ export function SentinelStatus() {
   // Poll the live incident document; state machine + plan are derived from it.
   const { data: incident, lastUpdated, isLoading, refetch } = usePolling({
     fetchFn: fetchIncident,
-    interval: 2000,
+    interval: 1000,
   });
   // The action timeline is the real per-node agent activity from the backend.
   const { data: timeline, refetch: refetchTimeline } = usePolling({
     fetchFn: fetchTimeline,
-    interval: 2000,
+    interval: 1000,
   });
 
   const sentinelState = incident ? buildSentinelState(incident) : null;

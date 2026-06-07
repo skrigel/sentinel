@@ -39,6 +39,8 @@ export function HorizontalActionTimeline({ actions }: HorizontalActionTimelinePr
     }
   };
 
+  console.log("ACTION", actions)
+
   return (
     <div className="relative">
       {/* Horizontal connecting line */}
@@ -84,9 +86,10 @@ export function HorizontalActionTimeline({ actions }: HorizontalActionTimelinePr
               )}
 
               {/* Weave trace link */}
-              {isValidTraceId(action.traceId) && (
+              { 
                 <a
-                  href={getWeaveTraceUrl(action.traceId)}
+                  // href={getWeaveTraceUrl(action.traceId || '')}
+                  href={''}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors mt-2"
@@ -94,7 +97,7 @@ export function HorizontalActionTimeline({ actions }: HorizontalActionTimelinePr
                   View trace in Weave
                   <ExternalLink className="w-3 h-3" />
                 </a>
-              )}
+              }
             </div>
           </div>
         ))}

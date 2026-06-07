@@ -76,3 +76,44 @@ async def get_last_n_rss(n: int):
             break
     samples.reverse()
     return samples
+
+
+async def get_last_n_rss_by_agent(
+    n: int, agent_ids: list[str], legacy_agent_id: str
+) -> dict[str, list[dict]]:
+    """Return RSS samples grouped by agent id, oldest-first per agent.
+
+    New collectors can tag stream rows with ``agent_id``. Existing demo rows are
+    untagged, so they are attributed to the current primary monitored agent.
+    """
+    wanted = set(agent_ids)
+    grouped: dict[str, list[dict]] = {agent_id: [] for agent_id in agent_ids}
+    if not wanted:
+        return grouped
+    current_pid_by_agent: dict[str, str | None] = {}
+    entries = await redis.xrevrange(
+        METRICS_RSS, count=max(n * 4 * max(len(wanted), 1), 200)
+    )
+
+    for _id, fields in entries:
+        agent_id = fields.get("agent_id") or fields.get("agentId") or legacy_agent_id
+        if agent_id not in wanted:
+            continue
+        if len(grouped[agent_id]) >= n:
+            continue
+        try:
+            ts = float(fields["timestamp"])
+            rss = int(float(fields["rss"]))
+        except (KeyError, ValueError):
+            continue
+
+        pid = fields.get("pid")
+        if agent_id not in current_pid_by_agent:
+            current_pid_by_agent[agent_id] = pid
+        if pid != current_pid_by_agent[agent_id]:
+            continue
+        grouped[agent_id].append({"timestamp": ts, "rss": rss})
+
+    for samples in grouped.values():
+        samples.reverse()
+    return grouped

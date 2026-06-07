@@ -11,7 +11,7 @@ import time
 
 import psutil
 
-from redis_keys import METRICS_LOOPLAG, METRICS_MAXLEN, METRICS_RSS
+from redis_keys import METRICS_LOOPLAG, METRICS_MAXLEN, METRICS_RSS, VICTIM_AGENT_ID
 
 SAMPLE_INTERVAL_S = 2.0
 
@@ -33,9 +33,10 @@ async def collector_task(redis_client):
         ts = time.time()
 
         try:
+            agent_id = await redis_client.get(VICTIM_AGENT_ID) or "victim"
             await redis_client.xadd(
                 METRICS_RSS,
-                {"timestamp": ts, "rss": rss, "pid": proc.pid},
+                {"timestamp": ts, "rss": rss, "pid": proc.pid, "agent_id": agent_id},
                 maxlen=METRICS_MAXLEN,
                 approximate=True,
             )
