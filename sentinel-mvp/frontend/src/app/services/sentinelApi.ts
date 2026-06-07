@@ -205,6 +205,7 @@ export function buildProposedChanges(inc: IncidentDocument | null): ProposedChan
       diagnosis: fix.diagnosis,
       rootCause: fix.root_cause,
       blamedOp: inc.blamed_op ?? fix.blamed_op,
+      code: fix.code ?? undefined,
       autoApproved: false,
     },
   ];
@@ -259,6 +260,9 @@ export function buildInterventions(inc: IncidentDocument | null): Intervention[]
       rootCause: fix?.root_cause || fix?.diagnosis || 'Attributing root cause…',
       proposedFix: fix?.fix_strategy || fix?.summary || 'Pending diagnosis',
       status: PHASE_TO_INTERVENTION_STATUS[phase],
+      // Carry the diff through apply/verify/resolved so it stays visible after
+      // the victim is flipped to fixed mode.
+      code: fix?.code ?? undefined,
       metricsBefore: inc.anomaly ? +(inc.anomaly.slope / 1024 / 1024).toFixed(2) : 0,
       metricsAfter: v ? +(v.slope_after / 1024 / 1024).toFixed(2) : undefined,
     },

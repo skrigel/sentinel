@@ -45,9 +45,12 @@ def _make_op(redis_client):
     @weave.op()
     @instr
     async def process_batch():
-        # Simulate embedding a batch of retrieved documents: ~4 MB of floats.
-        # 512 docs * 1024 dims * 8 bytes ≈ 4 MB.
-        batch_embeddings = [[float(i) for i in range(1024)] for _ in range(512)]
+        # Simulate embedding a batch of retrieved documents: a 4 MB buffer.
+        # A bytearray is allocated as one contiguous block, so tracemalloc
+        # attributes its true size to this line — keeping per-op attribution in
+        # line with the RSS growth it causes (vs. a list of millions of boxed
+        # Python floats, whose RSS footprint dwarfs what tracemalloc reports).
+        batch_embeddings = bytearray(4 * 1024 * 1024)
 
         if get_mode() == "fixed":
             conversation_history.append(batch_embeddings)

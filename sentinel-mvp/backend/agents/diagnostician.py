@@ -37,6 +37,27 @@ def read_op_source(op_name: str) -> str:
     return src  # fall back to the whole module
 
 
+def _fix_code_diff(blamed_op: str) -> dict | None:
+    """The scoped memory beat's concrete fix: unbounded ``conversation_history``
+    -> sliding window K=8. Applying the fix flips the victim to the windowed
+    branch, so this before/after is the real change the system enacts."""
+    if blamed_op != "process_batch":
+        return None
+    return {
+        "file": "victim/ops.py",
+        "line": 61,
+        "before": (
+            "# BUG: appended forever, never released -> unbounded growth.\n"
+            "conversation_history.append(batch_embeddings)"
+        ),
+        "after": (
+            "conversation_history.append(batch_embeddings)\n"
+            "# FIX: sliding window — retain only the last K=8 batches.\n"
+            "del conversation_history[:-WINDOW_K]"
+        ),
+    }
+
+
 @weave.op()
 def evaluate_diagnosis(proposal: dict, ground_truth: dict) -> dict:
     """Weave eval: did the LLM identify the right op and mechanism?"""
@@ -133,6 +154,7 @@ async def diagnose(enriched: dict) -> dict:
 
     proposal["blamed_op"] = blamed_op
     proposal["evidence"] = evidence
+    proposal["code"] = _fix_code_diff(blamed_op)
     proposal["eval"] = evaluate_diagnosis(proposal, GROUND_TRUTH)
 
     await redis.publish(EVENTS_PROPOSAL, json.dumps(proposal))

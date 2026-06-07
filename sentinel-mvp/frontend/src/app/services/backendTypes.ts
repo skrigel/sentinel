@@ -66,6 +66,13 @@ export interface ProposedFix {
   // cache/memory recall fields
   summary?: string;
   similarity?: number;
+  // Concrete before/after diff for the scoped fix (diagnostician._fix_code_diff).
+  code?: {
+    file: string;
+    before: string;
+    after: string;
+    line: number;
+  } | null;
 }
 
 export interface SelfTestResult {
