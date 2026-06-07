@@ -21,6 +21,7 @@ services:
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - WEAVE_PROJECT=${WEAVE_PROJECT:-sentinel}
       - VICTIM_MODE=${VICTIM_MODE:-buggy}
+      - VICTIM_BEAT=${VICTIM_BEAT:-memory}
       - DEMO_MODE=${DEMO_MODE:-true}
       - ACTIVE_AGENT_PATH=/data/active_agent.py
     volumes:

@@ -15,7 +15,12 @@ import redis.asyncio as aioredis
 import weave
 
 from collector import collector_task
-from redis_keys import VICTIM_AGENT_ID, VICTIM_AGENT_VERSION, VICTIM_MODE
+from redis_keys import (
+    VICTIM_AGENT_ID,
+    VICTIM_AGENT_VERSION,
+    VICTIM_BEAT,
+    VICTIM_MODE,
+)
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 LOOP_SLEEP_S = 1.0
@@ -30,6 +35,22 @@ async def resolve_startup_mode(r) -> str:
         await r.set(VICTIM_MODE, mode)
     os.environ["_RESOLVED_MODE"] = mode
     return mode
+
+
+def _normalize_beat(beat: str | None) -> str:
+    return beat if beat in {"memory", "cpu"} else "memory"
+
+
+async def resolve_startup_beat(r) -> str:
+    """The Redis beat flag wins; fall back to env, then memory."""
+    beat = await r.get(VICTIM_BEAT)
+    if beat is None:
+        beat = _normalize_beat(os.environ.get("VICTIM_BEAT", "memory"))
+        await r.set(VICTIM_BEAT, beat)
+    else:
+        beat = _normalize_beat(beat)
+    os.environ["_RESOLVED_BEAT"] = beat
+    return beat
 
 
 async def resolve_agent_version(r) -> str:
@@ -63,8 +84,10 @@ def load_make_op():
     return _make_op
 
 
-async def runtime_watcher(r, current_mode: str, current_agent_version: str):
-    """Exit if mode or selected agent changes; Docker restarts a clean process."""
+async def runtime_watcher(
+    r, current_mode: str, current_agent_version: str, current_beat: str
+):
+    """Exit if mode, selected agent, or beat changes; Docker restarts us clean."""
     while True:
         await asyncio.sleep(2.0)
         mode = await r.get(VICTIM_MODE)
@@ -75,11 +98,13 @@ async def runtime_watcher(r, current_mode: str, current_agent_version: str):
         if agent_version is not None and agent_version != current_agent_version:
             print("[victim] selected agent changed; exiting to restart")
             os._exit(0)
+        beat = await r.get(VICTIM_BEAT)
+        if beat is not None and _normalize_beat(beat) != current_beat:
+            print(f"[victim] beat flip {current_beat} -> {beat}; exiting to restart")
+            os._exit(0)
 
 
 async def main():
-    tracemalloc.start()
-
     # Weave tracing is best-effort: if the key is missing we still run.
     try:
         weave.init(os.environ.get("WEAVE_PROJECT", "sentinel") + "-victim")
@@ -88,14 +113,23 @@ async def main():
 
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     mode = await resolve_startup_mode(r)
+    beat = await resolve_startup_beat(r)
     agent_version = await resolve_agent_version(r)
-    print(f"[victim] starting in {mode!r} mode (agent_version={agent_version})")
+
+    # tracemalloc distorts self-time, so keep it off during the CPU beat
+    # (CLAUDE.md: disable tracemalloc during CPU-beat timing runs).
+    if beat != "cpu":
+        tracemalloc.start()
+    print(
+        f"[victim] starting in {mode!r} mode with {beat!r} beat "
+        f"(agent_version={agent_version})"
+    )
 
     _make_op = load_make_op()
     initialize, process_batch, retrieve, cleanup = _make_op(r)
 
     asyncio.create_task(collector_task(r))
-    asyncio.create_task(runtime_watcher(r, mode, agent_version))
+    asyncio.create_task(runtime_watcher(r, mode, agent_version, beat))
 
     while True:
         await initialize()
