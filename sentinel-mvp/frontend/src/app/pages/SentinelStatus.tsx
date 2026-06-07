@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Settings } from 'lucide-react';
+import { ArrowLeft, Settings } from 'lucide-react';
 import { ProposedChangeCard } from '../components/ProposedChangeCard';
 import { LiveDiffApproval, DiffPhase } from '../components/LiveDiffApproval';
 import { StateMachineGraph } from '../components/StateMachineGraph';
@@ -135,8 +135,9 @@ export function SentinelStatus() {
         <div className="px-8 py-6">
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-4">
-              <Link to="/" className="text-blue-600 hover:text-blue-700 text-sm">
-                ← Dashboard
+              <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-blue-600 hover:text-blue-700 text-sm">
+                <ArrowLeft className="h-4 w-4" />
+                Dashboard
               </Link>
             </div>
             <div className="flex items-center gap-4">

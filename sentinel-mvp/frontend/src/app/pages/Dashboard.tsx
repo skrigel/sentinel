@@ -144,12 +144,20 @@ export function Dashboard() {
               <h1 className="text-2xl font-light text-gray-900">Sentinel</h1>
               <p className="text-sm text-gray-500 mt-1">Agent monitoring and self-healing system</p>
             </div>
-            <Link
-              to="/sentinel"
-              className="px-4 py-2 bg-gray-900 text-white text-sm font-medium rounded hover:bg-gray-800 transition-colors"
-            >
-              Sentinel Status
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/"
+                className="px-4 py-2 bg-white border border-gray-300 text-gray-700 text-sm font-medium rounded hover:bg-gray-50 transition-colors"
+              >
+                Home
+              </Link>
+              <Link
+                to="/sentinel"
+                className="px-4 py-2 bg-gray-900 text-white text-sm font-medium rounded hover:bg-gray-800 transition-colors"
+              >
+                Sentinel Status
+              </Link>
+            </div>
           </div>
         </div>
       </header>
