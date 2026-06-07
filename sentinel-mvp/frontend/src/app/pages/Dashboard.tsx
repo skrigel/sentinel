@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Trash2 } from 'lucide-react';
 import { MetricChart } from '../components/MetricChart';
+import { KernelSignalsCard, FingerprintCard } from '../components/KernelSignals';
 import { InterventionCard } from '../components/InterventionCard';
 import { IssueNotification } from '../components/IssueNotification';
 import { FileSelector } from '../components/FileUpload';
@@ -9,10 +10,12 @@ import { usePolling } from '../hooks/usePolling';
 import {
   buildAgent,
   deleteAgent,
+  extractFingerprint,
   fetchAgentMemoryMetrics,
   fetchAgents,
   fetchIncident,
   fetchInterventions,
+  fetchKernelSignals,
   hasActiveIssue,
   updateAgent,
   uploadAgents,
@@ -33,6 +36,8 @@ export function Dashboard() {
   });
   // Durable list of past + active interventions (persists across incidents/reset).
   const { data: interventionList } = usePolling({ fetchFn: fetchInterventions, interval: 1000 });
+  // Extra kernel signals (USS / CPU% / FDs / threads) from GET /api/procstat.
+  const { data: kernelSignals } = usePolling({ fetchFn: fetchKernelSignals, interval: 2000 });
 
   const agents = agentList ?? [];
   const monitoredAgents = agents.filter((item) => item.monitored);
@@ -46,6 +51,8 @@ export function Dashboard() {
     name: primarySeries ? agentLabel(primarySeries.agent) : 'Document-QA Agent',
   };
   const interventions = interventionList ?? [];
+  const fingerprint = extractFingerprint(incident ?? null);
+  const signals = kernelSignals ?? { uss: [], cpuPct: [], numFds: [], numThreads: [] };
   const showNotification = !dismissedIssue && hasActiveIssue(incident ?? null);
   const selectedSeries = memorySeries.filter((series) =>
     selectedMemoryAgentIds.includes(series.agent.id)
@@ -295,13 +302,23 @@ export function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Cause fingerprint (deterministic classification from the signals). */}
+          <FingerprintCard
+            fingerprint={fingerprint}
+            subcause={incident?.suspected_subcause}
+            confidence={incident?.confidence}
+          />
+
+          {/* Extra kernel signals pulled from the OS by the collector. */}
+          <KernelSignalsCard signals={signals} status={agent.status} />
         </div>
 
         {/* Right: Agent Activity */}
         <div className="space-y-6">
           <h2 className="text-lg font-medium text-gray-900">Agent Activity</h2>
 
-          <div className="space-y-3">
+          <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
             {interventions.length > 0 ? (
               interventions.map(intervention => (
                 <div key={intervention.id} className="border border-gray-200 rounded-lg overflow-hidden">

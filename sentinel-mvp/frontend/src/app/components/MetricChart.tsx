@@ -6,9 +6,13 @@ interface MetricChartProps {
   type: MetricType;
   status: 'healthy' | 'warning' | 'critical' | 'recovering';
   label?: string;
+  /** Override the unit (defaults to MB for memory, % otherwise). */
+  unit?: string;
+  /** Decimal places for the value readout/tooltip (default 1). */
+  precision?: number;
 }
 
-export function MetricChart({ data, type, status, label }: MetricChartProps) {
+export function MetricChart({ data, type, status, label, unit: unitProp, precision = 1 }: MetricChartProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString('en-US', {
@@ -25,13 +29,14 @@ export function MetricChart({ data, type, status, label }: MetricChartProps) {
     return '#3b82f6';
   };
 
+  const round = Math.pow(10, precision);
   const chartData = data.map(d => ({
     time: d.timestamp,
-    value: Math.round(d.value * 10) / 10,
+    value: Math.round(d.value * round) / round,
   }));
 
   const currentValue = chartData[chartData.length - 1]?.value || 0;
-  const unit = type === 'memory' ? 'MB' : '%';
+  const unit = unitProp ?? (type === 'memory' ? 'MB' : '%');
 
   return (
     <div className="space-y-3">
@@ -41,7 +46,7 @@ export function MetricChart({ data, type, status, label }: MetricChartProps) {
             {label ?? (type === 'memory' ? 'Memory' : 'CPU')}
           </div>
           <div className="text-2xl font-light text-gray-900 mt-1">
-            {currentValue.toFixed(1)}
+            {currentValue.toFixed(precision)}
             <span className="text-base text-gray-400 ml-1">{unit}</span>
           </div>
         </div>
@@ -80,7 +85,10 @@ export function MetricChart({ data, type, status, label }: MetricChartProps) {
               fontSize: '12px',
             }}
             labelFormatter={formatTime}
-            formatter={(value: number) => [`${value.toFixed(1)}${unit}`, type === 'memory' ? 'Memory' : 'CPU']}
+            formatter={(value: number) => [
+              `${value.toFixed(precision)}${unit}`,
+              label ?? (type === 'memory' ? 'Memory' : 'CPU'),
+            ]}
           />
           <Line
             type="monotone"

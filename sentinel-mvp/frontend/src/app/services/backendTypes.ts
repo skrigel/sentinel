@@ -129,6 +129,16 @@ export interface RssSample {
   rss: number; // bytes
 }
 
+/** One kernel process-stat sample from GET /api/procstat (oldest-first).
+ *  Any field can be null when the OS read failed (utils/redis_client.py). */
+export interface ProcstatSample {
+  timestamp: number; // seconds
+  uss: number | null; // unique set size, bytes
+  cpu_pct: number | null; // process CPU %
+  num_fds: number | null; // open file descriptors
+  num_threads: number | null; // thread count
+}
+
 /** One uploaded/default monitor target from GET /api/agents. */
 export interface AgentRecord {
   id: string;

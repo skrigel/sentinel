@@ -166,10 +166,17 @@ async def test_cpu_hotpath_path_pauses_then_resolves(monkeypatch):
     async def fake_sleep(_seconds):
         return None
 
+    # No prior fix in the store: force the path through diagnose (fake_diagnose),
+    # not a recalled memory-leak fix. Without this, retrieve_fix can recall an
+    # unrelated cached fix from a live Redis and plan_fix skips diagnose.
+    async def fake_recall(_state):
+        return None
+
     monkeypatch.setattr(graph_nodes, "attribute_cpu", fake_attribute_cpu)
     monkeypatch.setattr(graph_nodes, "diagnose", fake_diagnose)
     monkeypatch.setattr(graph_nodes, "get_last_n_looplag", fake_get_last_n_looplag)
     monkeypatch.setattr(graph_nodes.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(graph_nodes.memory, "recall", fake_recall)
 
     compiled = build_incident_graph()
     config = {"configurable": {"thread_id": "cpu-hotpath"}}

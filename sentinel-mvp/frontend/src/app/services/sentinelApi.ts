@@ -7,6 +7,7 @@ import {
   IncidentDocument,
   IncidentResponse,
   IncidentStatus,
+  ProcstatSample,
   RssSample,
   TimelineEvent,
 } from './backendTypes';
@@ -329,6 +330,55 @@ export async function fetchMemoryMetrics(): Promise<MetricDataPoint[]> {
     timestamp: s.timestamp * 1000,
     value: s.rss / 1024 / 1024,
   }));
+}
+
+/** The four extra kernel signals the collector pulls from the OS, each as a
+ *  ready-to-chart series (null samples dropped). USS is converted to MB. */
+export interface KernelSignals {
+  uss: MetricDataPoint[]; // MB
+  cpuPct: MetricDataPoint[]; // %
+  numFds: MetricDataPoint[]; // count
+  numThreads: MetricDataPoint[]; // count
+}
+
+export async function fetchKernelSignals(): Promise<KernelSignals> {
+  const samples = await getJson<ProcstatSample[]>('/api/procstat');
+  const series = (pick: (s: ProcstatSample) => number | null, scale = 1): MetricDataPoint[] =>
+    samples
+      .filter((s) => pick(s) !== null)
+      .map((s) => ({ timestamp: s.timestamp * 1000, value: (pick(s) as number) * scale }));
+  return {
+    uss: series((s) => s.uss, 1 / 1024 / 1024),
+    cpuPct: series((s) => s.cpu_pct),
+    numFds: series((s) => s.num_fds),
+    numThreads: series((s) => s.num_threads),
+  };
+}
+
+/** The deterministic cross-signal fingerprint the graph attaches to an incident
+ *  (backend/graph/fingerprint.py), pulled off the evidence[] it already sends. */
+export interface FingerprintEvidence {
+  matched_rule?: string;
+  tracemalloc_pct?: number | null;
+  uss_net?: number | null;
+  fds_net?: number | null;
+  threads_net?: number | null;
+  cpu_pct_mean?: number | null;
+  loop_lag_mean?: number | null;
+  mode?: 'compute_bound' | 'blocking_io';
+}
+
+export function extractFingerprint(inc: IncidentDocument | null): FingerprintEvidence | null {
+  const entry = (inc?.evidence ?? []).find((e) => (e as { type?: string }).type === 'fingerprint');
+  return (entry as FingerprintEvidence | undefined) ?? null;
+}
+
+/** Subcauses the graph reports but intentionally cannot auto-fix yet
+ *  (fd/thread/native-memory leaks honestly end at report_unresolved). */
+const NON_AUTOFIXABLE_SUBCAUSES = new Set(['fd_leak', 'thread_leak', 'native_memory_growth']);
+
+export function isAutoFixable(subcause: string | null | undefined): boolean {
+  return !!subcause && !NON_AUTOFIXABLE_SUBCAUSES.has(subcause);
 }
 
 export interface AgentMemorySeries {

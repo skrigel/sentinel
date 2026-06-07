@@ -33,6 +33,7 @@ from utils.agent_store import (
     update_agent,
 )
 from utils.redis_client import (
+    get_last_n_procstat,
     get_last_n_rss,
     get_last_n_rss_by_agent,
     iter_pubsub_messages,
@@ -308,6 +309,16 @@ async def health():
 async def get_metrics():
     """Last 100 RSS samples (oldest-first) for the live graph."""
     return await get_last_n_rss(100)
+
+
+@app.get("/api/procstat")
+async def get_procstat(n: int = 100):
+    """Last n kernel process-stat samples (oldest-first) for the live charts.
+
+    Each sample carries the four extra signals the collector pulls from the OS:
+    uss, cpu_pct, num_fds, num_threads (any may be null if the read failed).
+    """
+    return await get_last_n_procstat(n)
 
 
 @app.get("/api/timeline")
