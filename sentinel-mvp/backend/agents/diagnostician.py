@@ -93,7 +93,7 @@ def fix_code_diff(blamed_op: str, filename: str = "victim/ops.py") -> dict | Non
     if blamed_op == "process_batch":
         return {
             "file": filename,
-            "line": 61,
+            "line": 107,
             "before": (
                 "# BUG: appended forever, never released -> unbounded growth.\n"
                 "conversation_history.append(batch_embeddings)"

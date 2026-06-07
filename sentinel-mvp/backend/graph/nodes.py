@@ -36,9 +36,15 @@ from .state import RECOVERY_REDUCTION_TARGET
 _hallucination_scorer = None
 _SELF_TEST_ITERATIONS = 40
 _SELF_TEST_WINDOW_K = 8
-# Seconds to wait after flipping the victim to fixed mode before measuring
-# recovery (covers the self-exit + Docker restart + a few fresh RSS samples).
-_VERIFY_WAIT_S = float(os.environ.get("VERIFY_WAIT_S", "16"))
+# Verify polls until the restarted (fixed) victim's signal settles, rather than
+# sleeping a fixed time: the victim is pid 1 in its container, so pid can't tell
+# the restarted process from the dying one — we instead wait for the RSS
+# re-baseline / loop-lag drop to show real, measured recovery.
+_VERIFY_MAX_WAIT_S = float(os.environ.get("VERIFY_MAX_WAIT_S", "45"))
+_VERIFY_POLL_S = float(os.environ.get("VERIFY_POLL_S", "3"))
+# A fixed-mode restart re-baselines RSS well below the leaked peak; the largest
+# downward step in the series marks that restart.
+_RESTART_DROP_FRAC = 0.6
 
 # On stage the LLM-judge hallucination gate is too strict (it flags correct but
 # generically-worded diagnoses), so the demo bypasses it. The strict gate still
@@ -519,47 +525,67 @@ async def n_apply(state: dict) -> dict:
     return await _finish(state, update, "apply", "apply", "set victim fixed mode")
 
 
+def _post_restart_rss(samples: list[dict]) -> list[dict]:
+    """RSS samples to score the fixed victim's slope on.
+
+    The victim is pid 1 in its container, so pid can't separate the restarted
+    (fixed) process from the dying (buggy) one. The fixed process re-baselines
+    far below the leaked peak, so the last sharp downward step marks the restart
+    and we score only the samples after it. Before any restart drop is seen we
+    fall back to the whole window: a still-climbing buggy window then scores as
+    not-recovered (we keep polling), while a settled flat window scores as
+    recovered.
+    """
+    drop_idx = None
+    for i in range(1, len(samples)):
+        if samples[i]["rss"] < samples[i - 1]["rss"] * _RESTART_DROP_FRAC:
+            drop_idx = i
+    return samples[drop_idx:] if drop_idx is not None else samples
+
+
+async def _measure_recovery(state: dict) -> tuple[float, float, bool]:
+    """Poll until the fixed victim's signal settles into measured recovery.
+
+    Returns (before, after, recovered). For the memory beat we wait for the
+    restart re-baseline then score the fixed process's RSS slope; for the CPU
+    beat we score the recent loop-lag. Polls up to ``_VERIFY_MAX_WAIT_S`` and
+    returns the last measurement on timeout (recovered stays False -> rollback).
+    """
+    anomaly = state.get("anomaly") or {}
+    is_cpu = state.get("symptom_type") == "cpu_hotpath"
+    before = (anomaly.get("lag_mean") if is_cpu else anomaly.get("slope")) or 1
+    after = before
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + _VERIFY_MAX_WAIT_S
+
+    while True:
+        if is_cpu:
+            samples = await get_last_n_looplag(10)
+            if samples:
+                after = sum(s["lag"] for s in samples) / len(samples)
+        else:
+            post = _post_restart_rss(await get_last_n_rss(60))
+            if len(post) >= 5:
+                after, _ = linregress(
+                    [s["timestamp"] for s in post], [s["rss"] for s in post]
+                )
+        reduction = 1 - (after / before)
+        if reduction >= RECOVERY_REDUCTION_TARGET:
+            return before, after, True
+        if loop.time() >= deadline:
+            return before, after, False
+        await asyncio.sleep(_VERIFY_POLL_S)
+
+
 @weave.op(name="sentinel.verify")
 async def n_verify(state: dict) -> dict:
-    # Applying the fix flips the victim to fixed mode, which self-exits and is
-    # restarted clean by Docker. Wait for that restart + a few fresh RSS samples
-    # (collector samples every 2s) before measuring, so recovery is real and
-    # the new pid's slope — not the dying buggy pid's — is what we score.
-    await asyncio.sleep(_VERIFY_WAIT_S)
-    anomaly = state.get("anomaly") or {}
+    before, after, recovered = await _measure_recovery(state)
+    reduction = 1 - (after / before)
     if state.get("symptom_type") == "cpu_hotpath":
-        samples = await get_last_n_looplag(10)
-        lag_after = (
-            sum(sample["lag"] for sample in samples) / len(samples)
-            if samples
-            else 0
-        )
-        lag_before = anomaly.get("lag_mean", 0) or 1
-        reduction = 1 - (lag_after / lag_before)
-        verification = {
-            "lag_before": lag_before,
-            "lag_after": lag_after,
-            "reduction_pct": reduction * 100,
-            "recovered": reduction >= RECOVERY_REDUCTION_TARGET,
-        }
+        verification = {"lag_before": before, "lag_after": after}
     else:
-        samples = await get_last_n_rss(30)
-        if len(samples) >= 5:
-            slope_after, _ = linregress(
-                [sample["timestamp"] for sample in samples],
-                [sample["rss"] for sample in samples],
-            )
-        else:
-            slope_after = 0
-        slope_before = anomaly.get("slope", 0) or 1
-        reduction = 1 - (slope_after / slope_before)
-        verification = {
-            "slope_before": slope_before,
-            "slope_after": slope_after,
-            "reduction_pct": reduction * 100,
-            "recovered": reduction >= RECOVERY_REDUCTION_TARGET,
-        }
-    recovered = reduction >= RECOVERY_REDUCTION_TARGET
+        verification = {"slope_before": before, "slope_after": after}
+    verification.update({"reduction_pct": reduction * 100, "recovered": recovered})
     update = {
         "status": "VERIFYING_RECOVERY",
         "verification": verification,

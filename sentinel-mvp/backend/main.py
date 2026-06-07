@@ -56,7 +56,7 @@ from utils.redis_keys import (
 from utils.weave_client import init_weave
 
 # init_weave()
-ORCHESTRATOR = os.environ.get("ORCHESTRATOR", "legacy")
+ORCHESTRATOR = os.environ.get("ORCHESTRATOR", "graph")
 ACTIVE_AGENT_PATH = os.environ.get("ACTIVE_AGENT_PATH", "/data/active_agent.py")
 
 supervisor = Supervisor()
@@ -196,10 +196,8 @@ async def _activate_agent_runtime(agent_id: str) -> None:
 # return the state machine to its IDLE start state (durable history lives in SQLite).
 RESOLVED_LINGER_S = 6.0
 
-
-def _was_recovered(result: dict) -> bool:
-    verification = (result or {}).get("verification") or {}
-    return bool(verification.get("recovered"))
+# Graph end-states: after lingering on either, return the UI to observing (IDLE).
+_TERMINAL_STATES = {"RESOLVED", "REPORT_UNRESOLVED"}
 
 
 async def _return_to_idle_after(delay: float = RESOLVED_LINGER_S) -> None:
@@ -256,15 +254,22 @@ async def _graph_anomaly_listener():
         # Fresh incident -> fresh timeline so stale node events don't bleed across.
         await redis.delete(TIMELINE_EVENTS)
         result = await runner.start_from_anomaly(json.loads(msg["data"]))
+        status = result.get("status")
         # The graph interrupts before apply for human approval; auto-approve
         # resumes it deterministically (no LLM on the coordination path).
-        if result.get("status") == "AWAITING_APPROVAL" and await _auto_approve_enabled():
-            try:
-                applied = await runner.approve_and_apply()
-                if _was_recovered(applied):
+        if status == "AWAITING_APPROVAL":
+            if await _auto_approve_enabled():
+                try:
+                    await runner.approve_and_apply()
+                    # Terminal either way -> linger, then back to observing.
                     asyncio.create_task(_return_to_idle_after())
-            except Exception:
-                pass
+                except Exception:
+                    pass
+            # else: hold at the approval gate for the human (no idle return).
+        elif status in _TERMINAL_STATES:
+            # The graph gave up before approval (e.g. REPORT_UNRESOLVED) -> still
+            # linger on the outcome, then return to observing.
+            asyncio.create_task(_return_to_idle_after())
 
 
 @contextlib.asynccontextmanager
@@ -303,6 +308,28 @@ async def health():
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _weave_project_url(project: str) -> str:
+    """Build the W&B Weave project URL for a `WEAVE_PROJECT` value.
+
+    `WEAVE_PROJECT` is either "entity/project" or a bare "project"; the backend
+    inits weave with a "-backend" suffix, so its traces live under that project.
+    """
+    if "/" in project:
+        entity, name = project.split("/", 1)
+        return f"https://wandb.ai/{entity}/{name}/weave"
+    return f"https://wandb.ai/{project}/weave"
+
+
+@app.get("/api/config")
+async def get_config():
+    """Frontend-visible config: one Weave project URL for all trace links."""
+    weave_project = os.environ.get("WEAVE_PROJECT", "sentinel")
+    return {
+        "weave_project": weave_project,
+        "weave_url": _weave_project_url(f"{weave_project}-backend"),
+    }
 
 
 @app.get("/api/metrics")
@@ -489,8 +516,10 @@ async def apply_fix():
     try:
         if ORCHESTRATOR == "graph":
             result = await _get_graph_runner().approve_and_apply()
-            if _was_recovered(result):
-                asyncio.create_task(_return_to_idle_after())
+            # approve_and_apply always ends terminal (RESOLVED or
+            # REPORT_UNRESOLVED); linger on the outcome, then return to observing
+            # either way so the UI doesn't get stuck on "completed".
+            asyncio.create_task(_return_to_idle_after())
             return {"status": "done", "verification": result.get("verification")}
         result = await supervisor.apply_fix()
         if supervisor.state == "RESOLVED":

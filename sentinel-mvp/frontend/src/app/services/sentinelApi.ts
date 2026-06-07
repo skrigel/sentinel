@@ -182,10 +182,10 @@ export function buildSentinelPlan(inc: IncidentDocument | null): SentinelPlan {
       if (resolved) status = 'completed';
       else if (stepIdx < currentIdx) status = 'completed';
       else if (stepIdx > currentIdx) status = 'pending';
-      // The two 'proposing' steps: the second ("await approval") only goes active
-      // once the backend is actually AWAITING_APPROVAL.
+      // The two 'proposing' steps: once the backend is AWAITING_APPROVAL the
+      // diagnosis is done (mark it completed) and only "await approval" is active.
       else if (s.step.includes('await approval')) status = awaiting ? 'active' : 'pending';
-      else status = 'active';
+      else status = awaiting ? 'completed' : 'active';
       return { step: s.step, status };
     }),
   };
@@ -203,26 +203,67 @@ function severityFromAnomaly(inc: IncidentDocument): 'warning' | 'critical' {
   return inc.anomaly?.severity === 'HIGH' ? 'critical' : 'warning';
 }
 
+/** Normalize an incident's proposed_fix into the dashboard's ProposedChange. */
+function proposedFixToChange(inc: IncidentDocument): ProposedChange | null {
+  const fix = inc.proposed_fix;
+  if (!fix) return null;
+  return {
+    id: inc.incident_id ?? 'pending',
+    timestamp: (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000,
+    agentId: fix.agent_id ?? VICTIM_AGENT_ID,
+    agentName: fix.agent_name ?? VICTIM_AGENT_NAME,
+    issue: inc.suspected_subcause || inc.symptom_type || 'anomaly',
+    severity: severityFromAnomaly(inc),
+    proposedFix: fix.fix_strategy || fix.summary || 'Apply pre-written fixed mode',
+    diagnosis: fix.diagnosis,
+    rootCause: fix.root_cause,
+    blamedOp: inc.blamed_op ?? fix.blamed_op,
+    code: fix.code ?? undefined,
+    autoApproved: false,
+  };
+}
+
 /** A pending approval card, present only while the backend awaits human approval. */
 export function buildProposedChanges(inc: IncidentDocument | null): ProposedChange[] {
-  if (!inc || inc.status !== 'AWAITING_APPROVAL' || !inc.proposed_fix) return [];
-  const fix = inc.proposed_fix;
-  return [
-    {
-      id: inc.incident_id ?? 'pending',
-      timestamp: (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000,
-      agentId: fix.agent_id ?? VICTIM_AGENT_ID,
-      agentName: fix.agent_name ?? VICTIM_AGENT_NAME,
-      issue: inc.suspected_subcause || inc.symptom_type || 'anomaly',
-      severity: severityFromAnomaly(inc),
-      proposedFix: fix.fix_strategy || fix.summary || 'Apply pre-written fixed mode',
-      diagnosis: fix.diagnosis,
-      rootCause: fix.root_cause,
-      blamedOp: inc.blamed_op ?? fix.blamed_op,
-      code: fix.code ?? undefined,
-      autoApproved: false,
-    },
-  ];
+  if (!inc || inc.status !== 'AWAITING_APPROVAL') return [];
+  const change = proposedFixToChange(inc);
+  return change ? [change] : [];
+}
+
+/** Where, in the apply lifecycle, the live code diff should be shown. */
+export type LiveFixPhase = 'pending' | 'applying' | 'resolved';
+
+const STATUS_TO_LIVE_PHASE: Partial<Record<IncidentStatus, LiveFixPhase>> = {
+  AWAITING_APPROVAL: 'pending',
+  APPLYING_FIX: 'applying',
+  VERIFYING_RECOVERY: 'applying',
+  RESOLVED: 'resolved',
+};
+
+export interface LiveFix {
+  change: ProposedChange & { code: NonNullable<ProposedChange['code']> };
+  phase: LiveFixPhase;
+  reductionPct?: number;
+}
+
+/**
+ * The single in-flight code fix to animate, carried across approval → apply →
+ * resolved so the Monaco diff can play through the lifecycle. Returns null when
+ * there's no fix with a concrete diff to show (the diagnosis-only path falls
+ * back to ProposedChangeCard instead).
+ */
+export function buildLiveFix(inc: IncidentDocument | null): LiveFix | null {
+  if (!inc?.status) return null;
+  const phase = STATUS_TO_LIVE_PHASE[inc.status];
+  if (!phase) return null;
+  const change = proposedFixToChange(inc);
+  if (!change?.code) return null;
+  const reduction = inc.verification?.reduction_pct;
+  return {
+    change: change as LiveFix['change'],
+    phase,
+    reductionPct: typeof reduction === 'number' ? Math.round(reduction) : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +342,20 @@ export async function fetchIncident(): Promise<IncidentDocument | null> {
     return state && state !== 'IDLE' ? { status: state } : null;
   }
   return { status: state, ...incident };
+}
+
+/** Frontend-visible backend config: one Weave project URL for all trace links. */
+export interface AppConfig {
+  weave_project: string;
+  weave_url: string;
+}
+
+export async function fetchAppConfig(): Promise<AppConfig | null> {
+  try {
+    return await getJson<AppConfig>('/api/config');
+  } catch {
+    return null;
+  }
 }
 
 /** Real per-node agent activity log for the current incident, oldest-first. */

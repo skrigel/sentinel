@@ -2,32 +2,44 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Settings } from 'lucide-react';
 import { ProposedChangeCard } from '../components/ProposedChangeCard';
+import { LiveDiffApproval, DiffPhase } from '../components/LiveDiffApproval';
 import { StateMachineGraph } from '../components/StateMachineGraph';
 import { HorizontalActionTimeline } from '../components/HorizontalActionTimeline';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { usePolling } from '../hooks/usePolling';
 import {
   applyFix,
+  buildLiveFix,
   buildProposedChanges,
   buildSentinelPlan,
   buildSentinelState,
+  fetchActivity,
+  fetchAppConfig,
   fetchAutoApprove,
   fetchIncident,
-  fetchTimeline,
   forceDetection,
   resetIncident,
   setAutoApprove as persistAutoApprove,
 } from '../services/sentinelApi';
 import { ActionType } from '../sentinelTypes';
 
+const LIVE_FIX_HEADER: Record<DiffPhase, string> = {
+  pending: 'Pending Approval',
+  applying: 'Applying Fix',
+  resolved: 'Fix Applied',
+};
+
 export function SentinelStatus() {
   const [autoApprove, setAutoApprove] = useState(false);
   const [filterState, setFilterState] = useState<ActionType | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // One Weave project URL for all trace links (GET /api/config).
+  const [weaveUrl, setWeaveUrl] = useState<string | null>(null);
 
   // Hydrate the auto-approve toggle from the backend (it's a server-side gate).
   useEffect(() => {
     fetchAutoApprove().then(setAutoApprove).catch(() => {});
+    fetchAppConfig().then((cfg) => setWeaveUrl(cfg?.weave_url ?? null)).catch(() => {});
   }, []);
 
   const toggleAutoApprove = async () => {
@@ -48,19 +60,32 @@ export function SentinelStatus() {
     fetchFn: fetchIncident,
     interval: 1000,
   });
-  // The action timeline is the real per-node agent activity from the backend.
-  const { data: timeline, refetch: refetchTimeline } = usePolling({
-    fetchFn: fetchTimeline,
-    interval: 1000,
+  // Durable, cross-incident agent activity (SQLite-backed) so the Action History
+  // persists across incidents, resets, and reloads instead of being wiped with
+  // the per-incident timeline stream.
+  const { data: activity, refetch: refetchActivity } = usePolling({
+    fetchFn: fetchActivity,
+    interval: 1500,
   });
 
   const sentinelState = incident ? buildSentinelState(incident) : null;
   const plan = buildSentinelPlan(incident ?? null);
-  const actions = timeline ?? [];
-  const proposedChanges = applying ? [] : buildProposedChanges(incident ?? null);
+  const actions = activity ?? [];
+
+  // Fixes with a concrete code diff play through the live Monaco diff; the
+  // diagnosis-only fallback keeps the static ProposedChangeCard.
+  const liveFix = buildLiveFix(incident ?? null);
+  // Optimistically jump to the "applying" visual the moment we POST /api/apply,
+  // before the poll reflects APPLYING_FIX.
+  const livePhase: DiffPhase | null = liveFix
+    ? applying && liveFix.phase === 'pending'
+      ? 'applying'
+      : liveFix.phase
+    : null;
+  const proposedChanges = liveFix || applying ? [] : buildProposedChanges(incident ?? null);
 
   const refresh = async () => {
-    await Promise.all([refetch(), refetchTimeline()]);
+    await Promise.all([refetch(), refetchActivity()]);
   };
 
   const handleApprove = async () => {
@@ -212,7 +237,24 @@ export function SentinelStatus() {
 
           {/* Right Column: State Machine & Timeline */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Proposed Changes */}
+            {/* Live code diff — drives approval → apply → resolved off the
+                incident lifecycle via the Monaco diff editor. */}
+            {liveFix && livePhase && (
+              <div>
+                <h2 className="text-lg font-medium text-gray-900 mb-4">
+                  {LIVE_FIX_HEADER[livePhase]}
+                </h2>
+                <LiveDiffApproval
+                  change={liveFix.change}
+                  phase={livePhase}
+                  onApprove={handleApprove}
+                  onReject={handleReject}
+                  reductionPct={liveFix.reductionPct}
+                />
+              </div>
+            )}
+
+            {/* Diagnosis-only fallback (no concrete code diff produced) */}
             {proposedChanges.length > 0 && (
               <div>
                 <h2 className="text-lg font-medium text-gray-900 mb-4">
@@ -254,7 +296,7 @@ export function SentinelStatus() {
             <div>
               <h2 className="text-lg font-medium text-gray-900 mb-4">Action History</h2>
               <div className="bg-white border border-gray-200 rounded-lg p-6 overflow-x-auto">
-                <HorizontalActionTimeline actions={filteredActions} />
+                <HorizontalActionTimeline actions={filteredActions} weaveUrl={weaveUrl} />
               </div>
             </div>
           </div>

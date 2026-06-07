@@ -1,12 +1,13 @@
 import { ExternalLink } from 'lucide-react';
 import { SentinelAction } from '../sentinelTypes';
-import { getWeaveTraceUrl, isValidTraceId } from '../utils/weaveLinks';
 
 interface HorizontalActionTimelineProps {
   actions: SentinelAction[];
+  /** Weave project URL (GET /api/config); one link for all actions. */
+  weaveUrl?: string | null;
 }
 
-export function HorizontalActionTimeline({ actions }: HorizontalActionTimelineProps) {
+export function HorizontalActionTimeline({ actions, weaveUrl }: HorizontalActionTimelineProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString('en-US', {
@@ -85,11 +86,10 @@ export function HorizontalActionTimeline({ actions }: HorizontalActionTimelinePr
                 </div>
               )}
 
-              {/* Weave trace link */}
-              { 
+              {/* Weave trace link — one project URL for all actions. */}
+              {weaveUrl && (
                 <a
-                  // href={getWeaveTraceUrl(action.traceId || '')}
-                  href={''}
+                  href={weaveUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors mt-2"
@@ -97,7 +97,7 @@ export function HorizontalActionTimeline({ actions }: HorizontalActionTimelinePr
                   View trace in Weave
                   <ExternalLink className="w-3 h-3" />
                 </a>
-              }
+              )}
             </div>
           </div>
         ))}

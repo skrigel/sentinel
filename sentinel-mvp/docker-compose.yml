@@ -42,7 +42,7 @@ services:
       - WEAVE_PROJECT=${WEAVE_PROJECT:-sentinel}
       - DEMO_MODE=${DEMO_MODE:-true}
       # Selects the deterministic LangGraph orchestrator vs the legacy supervisor.
-      - ORCHESTRATOR=${ORCHESTRATOR:-legacy}
+      - ORCHESTRATOR=${ORCHESTRATOR:-graph}
       # Durable agent-activity log (SQLite) lives on the mounted volume below.
       - ACTIVITY_DB_PATH=/data/activity.db
     # Mount victim source so the Diagnostician can read the offending op's code.
