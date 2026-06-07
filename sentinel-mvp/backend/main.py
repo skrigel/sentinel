@@ -28,6 +28,7 @@ from utils.redis_keys import (
     EVENTS_STATE,
     INCIDENT_CURRENT,
     SETTINGS_AUTO_APPROVE,
+    TIMELINE_EVENTS,
     VICTIM_MODE,
 )
 from utils.weave_client import init_weave
@@ -93,6 +94,8 @@ async def _graph_anomaly_listener():
         if msg is None:
             continue
         runner = _get_graph_runner()
+        # Fresh incident -> fresh timeline so stale node events don't bleed across.
+        await redis.delete(TIMELINE_EVENTS)
         result = await runner.start_from_anomaly(json.loads(msg["data"]))
         # The graph interrupts before apply for human approval; auto-approve
         # resumes it deterministically (no LLM on the coordination path).
@@ -142,6 +145,31 @@ async def health():
 async def get_metrics():
     """Last 100 RSS samples (oldest-first) for the live graph."""
     return await get_last_n_rss(100)
+
+
+@app.get("/api/timeline")
+async def get_timeline(n: int = 100):
+    """Per-node agent activity for the current incident, oldest-first.
+
+    Each event is one graph node's decision (node, decision, reason, confidence,
+    status), so the frontend timeline reflects real backend agent state.
+    """
+    entries = await redis.xrevrange(TIMELINE_EVENTS, count=n)
+    events = []
+    for _id, fields in entries:
+        events.append(
+            {
+                "node": fields.get("node"),
+                "decision": fields.get("decision"),
+                "reason": fields.get("reason"),
+                "confidence": fields.get("confidence") or None,
+                "status": fields.get("status") or None,
+                "incident_id": fields.get("incident_id") or None,
+                "timestamp": float(fields.get("timestamp") or 0.0),
+            }
+        )
+    events.reverse()
+    return events
 
 
 @app.get("/api/incident")
@@ -223,7 +251,7 @@ async def reset():
     if ORCHESTRATOR == "graph":
         await _get_graph_runner().reset()
         await redis.set(VICTIM_MODE, "buggy")
-        await redis.delete(ATTRIB_MEM, ATTRIB_INVOCATIONS)
+        await redis.delete(ATTRIB_MEM, ATTRIB_INVOCATIONS, TIMELINE_EVENTS)
         await redis.hset(
             INCIDENT_CURRENT,
             mapping={"state": "IDLE", "data": json.dumps({})},
@@ -234,4 +262,5 @@ async def reset():
         )
         return {"status": "reset"}
     await supervisor.reset()
+    await redis.delete(TIMELINE_EVENTS)
     return {"status": "reset"}

@@ -8,12 +8,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/
 import { usePolling } from '../hooks/usePolling';
 import {
   applyFix,
-  buildActions,
   buildProposedChanges,
   buildSentinelPlan,
   buildSentinelState,
   fetchAutoApprove,
   fetchIncident,
+  fetchTimeline,
   forceDetection,
   resetIncident,
   setAutoApprove as persistAutoApprove,
@@ -43,23 +43,32 @@ export function SentinelStatus() {
   // before the next poll reflects the backend's APPLYING_FIX status.
   const [applying, setApplying] = useState(false);
 
-  // Poll the live incident document; everything below is derived from it.
+  // Poll the live incident document; state machine + plan are derived from it.
   const { data: incident, lastUpdated, isLoading, refetch } = usePolling({
     fetchFn: fetchIncident,
+    interval: 2000,
+  });
+  // The action timeline is the real per-node agent activity from the backend.
+  const { data: timeline, refetch: refetchTimeline } = usePolling({
+    fetchFn: fetchTimeline,
     interval: 2000,
   });
 
   const sentinelState = incident ? buildSentinelState(incident) : null;
   const plan = buildSentinelPlan(incident ?? null);
-  const actions = incident ? buildActions(incident) : [];
+  const actions = timeline ?? [];
   const proposedChanges = applying ? [] : buildProposedChanges(incident ?? null);
+
+  const refresh = async () => {
+    await Promise.all([refetch(), refetchTimeline()]);
+  };
 
   const handleApprove = async () => {
     setApplying(true);
     try {
       await applyFix();
     } finally {
-      await refetch();
+      await refresh();
       setApplying(false);
     }
   };
@@ -69,7 +78,7 @@ export function SentinelStatus() {
     try {
       await resetIncident();
     } finally {
-      await refetch();
+      await refresh();
       setApplying(false);
     }
   };
@@ -114,14 +123,14 @@ export function SentinelStatus() {
               )}
               {!hasIncident ? (
                 <button
-                  onClick={() => forceDetection().then(refetch)}
+                  onClick={() => forceDetection().then(refresh)}
                   className="px-3 py-1.5 bg-gray-900 text-white text-xs font-medium rounded hover:bg-gray-800 transition-colors"
                 >
                   Force Detection
                 </button>
               ) : (
                 <button
-                  onClick={() => resetIncident().then(refetch)}
+                  onClick={() => resetIncident().then(refresh)}
                   className="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-medium rounded hover:bg-gray-50 transition-colors"
                 >
                   Reset

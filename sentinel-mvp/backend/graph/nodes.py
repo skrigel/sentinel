@@ -52,7 +52,14 @@ async def _finish(state: dict, update: dict, node: str, decision: str, reason: s
     ):
         pass
     await broadcast(merged)
-    await narrate(node, decision, reason, merged.get("confidence"))
+    await narrate(
+        node,
+        decision,
+        reason,
+        merged.get("confidence"),
+        status=merged.get("status"),
+        incident_id=merged.get("incident_id"),
+    )
     return update
 
 

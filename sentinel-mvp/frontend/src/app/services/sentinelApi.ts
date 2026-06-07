@@ -6,6 +6,7 @@ import {
   IncidentResponse,
   IncidentStatus,
   RssSample,
+  TimelineEvent,
 } from './backendTypes';
 
 /**
@@ -24,11 +25,6 @@ const API_BASE: string =
 // Backend has one instrumented victim (the document-QA agent), not a fleet.
 const VICTIM_AGENT_ID = 'victim';
 const VICTIM_AGENT_NAME = 'Document-QA Agent';
-
-export interface SentinelStateResponse {
-  state: SentinelState;
-  recentActions: SentinelAction[];
-}
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
@@ -87,67 +83,54 @@ function isFailureTerminal(status: IncidentStatus | undefined): boolean {
 // Adapters: IncidentDocument -> dashboard view models.
 // ---------------------------------------------------------------------------
 
-const PHASE_LABEL: Record<ActionType, string> = {
-  detecting: 'Anomaly detected',
-  analyzing: 'Attributing root cause',
-  proposing: 'Proposing fix',
-  applying: 'Applying fix',
-  verifying: 'Verifying recovery',
-  completed: 'Incident resolved',
+// Each graph node maps to a timeline phase (for the dot color / state filter)
+// and a human-readable agent name (backend/graph/nodes.py).
+const NODE_TO_PHASE: Record<string, ActionType> = {
+  triage: 'detecting',
+  memory_investigate: 'analyzing',
+  evidence_collector: 'analyzing',
+  classify_cause: 'analyzing',
+  retrieve_fix: 'proposing',
+  plan_fix: 'proposing',
+  check_diagnosis: 'proposing',
+  self_test: 'proposing',
+  await_approval: 'proposing',
+  apply: 'applying',
+  verify: 'verifying',
+  store_learning: 'completed',
+  rollback: 'verifying',
+  report_unresolved: 'completed',
 };
 
-function phaseDetail(phase: ActionType, inc: IncidentDocument): string | undefined {
-  const ev = inc.evidence?.[inc.evidence.length - 1];
-  switch (phase) {
-    case 'detecting': {
-      const a = inc.anomaly;
-      if (!a) return undefined;
-      return `${a.type} · slope ${(a.slope / 1024 / 1024).toFixed(2)} MB/s · ${a.severity}`;
-    }
-    case 'analyzing':
-      if (inc.blamed_op) {
-        const pct = inc.pct_explained ?? ev?.pct_of_growth_explained;
-        return pct != null
-          ? `${inc.blamed_op} explains ${pct.toFixed(0)}% of RSS growth`
-          : `Blamed op: ${inc.blamed_op}`;
-      }
-      return undefined;
-    case 'proposing':
-      return inc.proposed_fix?.fix_strategy || inc.proposed_fix?.summary || undefined;
-    case 'applying':
-      return 'Flipped victim to fixed mode';
-    case 'verifying': {
-      const v = inc.verification;
-      if (!v) return undefined;
-      return `Slope ${(v.slope_after / 1024 / 1024).toFixed(2)} MB/s · ${v.reduction_pct.toFixed(0)}% reduction`;
-    }
-    case 'completed': {
-      const v = inc.verification;
-      if (isFailureTerminal(inc.status)) return inc.next_action || 'Recovery not confirmed';
-      return v ? `Recovered: ${v.reduction_pct.toFixed(0)}% slope reduction` : undefined;
-    }
-  }
-}
+const NODE_LABEL: Record<string, string> = {
+  triage: 'Triage',
+  memory_investigate: 'Attribution',
+  evidence_collector: 'Evidence collector',
+  classify_cause: 'Cause classifier',
+  retrieve_fix: 'Fix retrieval',
+  plan_fix: 'Diagnostician',
+  check_diagnosis: 'Hallucination gate',
+  self_test: 'Self-test',
+  await_approval: 'Approval gate',
+  apply: 'Apply',
+  verify: 'Verifier',
+  store_learning: 'Memory writer',
+  rollback: 'Rollback',
+  report_unresolved: 'Report',
+};
 
-/** Build a timeline of the phases reached so far, timestamped off the anomaly. */
-export function buildActions(inc: IncidentDocument): SentinelAction[] {
-  const current = statusToPhase(inc.status);
-  const currentIdx = phaseIndex(current);
-  const baseMs = (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000;
-  const STEP_MS = 3000;
-
-  return PHASES.slice(0, currentIdx + 1).map((phase, i) => {
-    const reached = i < currentIdx; // earlier phases are done
+/** Real per-node agent activity (GET /api/timeline) -> timeline actions. */
+export function timelineToActions(events: TimelineEvent[]): SentinelAction[] {
+  return events.map((e, i) => {
+    const label = NODE_LABEL[e.node] ?? e.node;
     return {
-      id: `${inc.incident_id ?? 'inc'}-${phase}`,
-      timestamp: baseMs + i * STEP_MS,
-      // A completed earlier phase reads as 'completed'; the live phase keeps its own type.
-      type: reached ? 'completed' : phase,
+      id: `${e.incident_id ?? 'inc'}-${i}-${e.node}`,
+      timestamp: e.timestamp * 1000,
+      type: NODE_TO_PHASE[e.node] ?? 'analyzing',
       agentId: VICTIM_AGENT_ID,
-      agentName: VICTIM_AGENT_NAME,
-      description: PHASE_LABEL[phase],
-      details: phaseDetail(phase, inc),
-      traceId: inc.incident_id,
+      agentName: label,
+      description: `${label}: ${e.decision}`,
+      details: e.reason,
     } satisfies SentinelAction;
   });
 }
@@ -305,21 +288,10 @@ export async function fetchIncident(): Promise<IncidentDocument | null> {
   return { status: state, ...incident };
 }
 
-/** Keeps the existing usePolling contract used by SentinelStatus. */
-export async function fetchSentinelState(): Promise<SentinelStateResponse> {
-  const inc = await fetchIncident();
-  if (!inc) {
-    return {
-      state: {
-        currentState: 'detecting',
-        activeAgent: null,
-        transitions: [],
-        lastUpdated: Date.now(),
-      },
-      recentActions: [],
-    };
-  }
-  return { state: buildSentinelState(inc), recentActions: buildActions(inc) };
+/** Real per-node agent activity log for the current incident, oldest-first. */
+export async function fetchTimeline(): Promise<SentinelAction[]> {
+  const events = await getJson<TimelineEvent[]>('/api/timeline');
+  return timelineToActions(events);
 }
 
 /** RSS memory series (MB) for the live chart, oldest-first. */

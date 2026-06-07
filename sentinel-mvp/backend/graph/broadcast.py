@@ -5,7 +5,13 @@ import time
 from typing import Any
 
 from utils.redis_client import redis
-from utils.redis_keys import EVENTS_NARRATION, EVENTS_STATE, INCIDENT_CURRENT
+from utils.redis_keys import (
+    EVENTS_NARRATION,
+    EVENTS_STATE,
+    INCIDENT_CURRENT,
+    TIMELINE_EVENTS,
+    TIMELINE_MAXLEN,
+)
 
 
 def _serializable(value: Any) -> Any:
@@ -41,15 +47,37 @@ async def narrate(
     decision: str,
     reason: str,
     confidence: float | None = None,
+    status: str | None = None,
+    incident_id: str | None = None,
 ) -> None:
+    """Publish a per-node activity event and persist it to the timeline stream so
+    the frontend can render the real agent activity log (not a synthesized one)."""
     try:
+        ts = time.time()
         payload = {
             "node": node,
             "decision": decision,
             "reason": reason,
             "confidence": confidence,
-            "timestamp": time.time(),
+            "status": status,
+            "incident_id": incident_id,
+            "timestamp": ts,
         }
         await redis.publish(EVENTS_NARRATION, json.dumps(payload, default=str))
+        # Stream fields must be strings; None -> "".
+        await redis.xadd(
+            TIMELINE_EVENTS,
+            {
+                "node": node,
+                "decision": decision,
+                "reason": reason,
+                "confidence": "" if confidence is None else str(confidence),
+                "status": status or "",
+                "incident_id": incident_id or "",
+                "timestamp": str(ts),
+            },
+            maxlen=TIMELINE_MAXLEN,
+            approximate=True,
+        )
     except Exception:
         pass

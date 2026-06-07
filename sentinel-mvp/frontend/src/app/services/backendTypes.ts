@@ -118,6 +118,17 @@ export interface RssSample {
   rss: number; // bytes
 }
 
+/** One per-node agent activity event from GET /api/timeline (oldest-first). */
+export interface TimelineEvent {
+  node: string;
+  decision: string;
+  reason: string;
+  confidence: string | null;
+  status: IncidentStatus | null;
+  incident_id: string | null;
+  timestamp: number; // seconds
+}
+
 /** POST /api/apply */
 export interface ApplyResponse {
   status: 'done' | 'error';

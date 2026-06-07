@@ -18,6 +18,8 @@ BASELINE_RSS_SLOPE = "baseline:rss_slope"  # Hash {mean, stddev, samples}
 
 # Incident tracking
 INCIDENT_CURRENT = "incident:current"  # Hash {state, data}
+TIMELINE_EVENTS = "timeline:events"  # Stream of per-node agent activity
+TIMELINE_MAXLEN = 500
 
 # Control flags
 VICTIM_MODE = "victim:mode"  # String: "buggy" | "fixed"
