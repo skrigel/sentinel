@@ -7,10 +7,12 @@ contract. Never hardcode key strings elsewhere.
 # Metric streams (time-series, XADD with MAXLEN)
 METRICS_RSS = "metrics:rss"
 METRICS_LOOPLAG = "metrics:looplag"
+METRICS_PROCSTAT = "metrics:procstat"
 METRICS_MAXLEN = 2000
 
 # Cumulative per-op attribution
 ATTRIB_MEM = "attrib:mem"  # ZSet {op_name: cumulative_bytes}
+ATTRIB_CPU = "attrib:cpu"  # ZSet {op_name: cumulative_self_time_s}
 ATTRIB_INVOCATIONS = "attrib:invocations"  # Hash {op_name: call_count}
 
 # Baseline for anomaly detection
@@ -25,6 +27,7 @@ TIMELINE_MAXLEN = 500
 VICTIM_MODE = "victim:mode"  # String: "buggy" | "fixed"
 VICTIM_AGENT_ID = "victim:agent_id"  # String: active monitored agent id
 VICTIM_AGENT_VERSION = "victim:agent_version"  # String: bumped to restart victim
+VICTIM_BEAT = "victim:beat"  # String: "memory" | "cpu"
 SETTINGS_AUTO_APPROVE = "settings:auto_approve"  # String: "1" | "0"
 
 # Pub/sub channels

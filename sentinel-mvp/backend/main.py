@@ -221,7 +221,10 @@ async def _anomaly_listener():
         data = json.loads(msg["data"])
         await supervisor.on_anomaly(data)
         # Deterministic handoff: attribute, then diagnose.
-        enriched = await attributor.attribute_anomaly(data)
+        if data.get("type") == "cpu_hotpath":
+            enriched = await attributor.attribute_cpu(data)
+        else:
+            enriched = await attributor.attribute_anomaly(data)
         await diagnostician.diagnose(enriched)
 
 
@@ -269,6 +272,7 @@ async def lifespan(app: FastAPI):
     await init_activity_db()
     await init_agent_store()
     _tasks.append(asyncio.create_task(detector.detect_anomaly()))
+    _tasks.append(asyncio.create_task(detector.detect_cpu_anomaly()))
     if ORCHESTRATOR == "graph":
         _tasks.append(asyncio.create_task(_graph_anomaly_listener()))
     else:

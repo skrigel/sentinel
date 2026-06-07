@@ -92,7 +92,7 @@ async def main():
     print(f"[victim] starting in {mode!r} mode (agent_version={agent_version})")
 
     _make_op = load_make_op()
-    initialize, process_batch, cleanup = _make_op(r)
+    initialize, process_batch, retrieve, cleanup = _make_op(r)
 
     asyncio.create_task(collector_task(r))
     asyncio.create_task(runtime_watcher(r, mode, agent_version))
@@ -100,6 +100,7 @@ async def main():
     while True:
         await initialize()
         await process_batch()
+        await retrieve()
         await cleanup()
         await asyncio.sleep(LOOP_SLEEP_S)
 

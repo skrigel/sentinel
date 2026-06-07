@@ -90,21 +90,34 @@ def fix_code_diff(blamed_op: str, filename: str = "victim/ops.py") -> dict | Non
     """The scoped memory beat's concrete fix: unbounded ``conversation_history``
     -> sliding window K=8. Applying the fix flips the victim to the windowed
     branch, so this before/after is the real change the system enacts."""
-    if blamed_op != "process_batch":
-        return None
-    return {
-        "file": filename,
-        "line": 61,
-        "before": (
-            "# BUG: appended forever, never released -> unbounded growth.\n"
-            "conversation_history.append(batch_embeddings)"
-        ),
-        "after": (
-            "conversation_history.append(batch_embeddings)\n"
-            "# FIX: sliding window — retain only the last K=8 batches.\n"
-            "del conversation_history[:-WINDOW_K]"
-        ),
-    }
+    if blamed_op == "process_batch":
+        return {
+            "file": filename,
+            "line": 61,
+            "before": (
+                "# BUG: appended forever, never released -> unbounded growth.\n"
+                "conversation_history.append(batch_embeddings)"
+            ),
+            "after": (
+                "conversation_history.append(batch_embeddings)\n"
+                "# FIX: sliding window — retain only the last K=8 batches.\n"
+                "del conversation_history[:-WINDOW_K]"
+            ),
+        }
+    if blamed_op == "retrieve":
+        return {
+            "file": filename,
+            "line": 124,
+            "before": (
+                "# BUG: CPU-bound JSON serialization blocks the event loop.\n"
+                "payload = json.dumps(big)"
+            ),
+            "after": (
+                "loop = asyncio.get_running_loop()\n"
+                "payload = await loop.run_in_executor(None, json.dumps, big)"
+            ),
+        }
+    return None
 
 
 @weave.op()
@@ -123,18 +136,43 @@ def evaluate_diagnosis(proposal: dict, ground_truth: dict) -> dict:
     }
 
 
-async def _call_llm(blamed_op: str, evidence: dict, source: str) -> dict:
+async def _call_llm(
+    blamed_op: str,
+    evidence: dict,
+    source: str,
+    incident_type: str = "memory_leak",
+) -> dict:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-    per_call_mb = evidence.get("per_call_avg", 0) / 1024 / 1024
-    system_prompt = (
-        "You are a Python memory-profiling expert. Given an operation's source "
-        "code and measured memory-attribution evidence, diagnose the root cause "
-        "of the memory leak and explain how to fix it."
-    )
-    user_prompt = f"""Operation: {blamed_op}
+    if incident_type == "cpu_hotpath":
+        system_prompt = (
+            "You are a Python asyncio performance expert. Given an operation's "
+            "source code and measured event-loop blocking evidence, diagnose "
+            "the root cause of the CPU hot path and explain how to fix it."
+        )
+        user_prompt = f"""Operation: {blamed_op}
+Evidence:
+- {evidence.get('per_call_avg_ms', 0):.1f} ms self-time per call
+- {evidence.get('invocations', 0)} invocations
+- Explains {evidence.get('pct_of_compute_explained', 0):.0f}% of total compute time
+
+Source code:
+```python
+{source}
+```
+
+Provide: (1) what is blocking the event loop, (2) why, (3) how to fix it,
+(4) confidence (high/medium/low)."""
+    else:
+        per_call_mb = evidence.get("per_call_avg", 0) / 1024 / 1024
+        system_prompt = (
+            "You are a Python memory-profiling expert. Given an operation's source "
+            "code and measured memory-attribution evidence, diagnose the root cause "
+            "of the memory leak and explain how to fix it."
+        )
+        user_prompt = f"""Operation: {blamed_op}
 Evidence:
 - Retained {per_call_mb:.1f} MB per call
 - {evidence.get('invocations', 0)} invocations
@@ -193,13 +231,14 @@ async def diagnose(enriched: dict) -> dict:
         agent = None
     entry_point = (agent or {}).get("entry_point") or DEFAULT_ENTRY_POINT
     blamed_op = enriched.get("blamed_op") or entry_point
+    incident_type = enriched.get("type", "memory_leak")
     source = read_op_source(blamed_op, agent_id=agent_id)
 
     proposal = None
     last_err = None
     for attempt in range(2):  # retry once with backoff (spec §5.2)
         try:
-            proposal = await _call_llm(blamed_op, evidence, source)
+            proposal = await _call_llm(blamed_op, evidence, source, incident_type)
             break
         except Exception as e:
             last_err = e

@@ -4,6 +4,8 @@ from .state import MAX_FIX_ATTEMPTS, MAX_INVESTIGATION_ROUNDS, MAX_TRIAGE_ROUNDS
 
 
 def route_after_triage(state) -> str:
+    if state.get("symptom_type") == "cpu_hotpath":
+        return "cpu_investigate"
     if state.get("symptom_type") == "memory_leak":
         return "investigate"
     return "unresolved"
@@ -24,6 +26,12 @@ def route_after_investigation(state) -> str:
         return "unresolved"
     if state.get("investigation_rounds", 0) < MAX_INVESTIGATION_ROUNDS:
         return "collect_more"
+    return "unresolved"
+
+
+def route_after_cpu_investigation(state) -> str:
+    if state.get("blamed_op") and state.get("pct_explained", 0.0) >= 50:
+        return "classify"
     return "unresolved"
 
 
