@@ -7,7 +7,7 @@ import os
 import redis.asyncio as aioredis
 import redis.exceptions as redis_exc
 
-from .redis_keys import METRICS_RSS
+from .redis_keys import METRICS_LOOPLAG, METRICS_RSS
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -72,6 +72,33 @@ async def get_last_n_rss(n: int):
         if pid != current_pid:
             break
         samples.append({"timestamp": ts, "rss": rss})
+        if len(samples) >= n:
+            break
+    samples.reverse()
+    return samples
+
+
+async def get_last_n_looplag(n: int):
+    """Return up to n loop-lag samples for the current victim PID, oldest-first."""
+    try:
+        entries = await redis.xrevrange(METRICS_LOOPLAG, count=max(n * 4, 200))
+    except Exception:
+        return []
+    unset = object()
+    current_pid = unset
+    samples = []  # newest-first while building
+    for _id, fields in entries:
+        try:
+            ts = float(fields["timestamp"])
+            lag = float(fields["lag"])
+        except (KeyError, ValueError):
+            continue
+        pid = fields.get("pid")
+        if current_pid is unset:
+            current_pid = pid
+        if pid != current_pid:
+            break
+        samples.append({"timestamp": ts, "lag": lag})
         if len(samples) >= n:
             break
     samples.reverse()

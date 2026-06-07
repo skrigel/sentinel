@@ -1,5 +1,6 @@
 from graph.routing import (
     route_after_diagnosis_check,
+    route_after_cpu_investigation,
     route_after_classify,
     route_after_investigation,
     route_after_self_test,
@@ -10,7 +11,7 @@ from graph.routing import (
 
 def test_route_after_triage():
     assert route_after_triage({"symptom_type": "memory_leak"}) == "investigate"
-    assert route_after_triage({"symptom_type": "cpu_hotpath"}) == "unresolved"
+    assert route_after_triage({"symptom_type": "cpu_hotpath"}) == "cpu_investigate"
     assert route_after_triage({}) == "unresolved"
 
 
@@ -32,6 +33,22 @@ def test_route_after_investigation():
         route_after_investigation({"pct_explained": 40, "investigation_rounds": 4})
         == "unresolved"
     )
+
+
+def test_route_after_cpu_investigation():
+    assert (
+        route_after_cpu_investigation(
+            {"blamed_op": "retrieve", "pct_explained": 75.0}
+        )
+        == "classify"
+    )
+    assert (
+        route_after_cpu_investigation(
+            {"blamed_op": "retrieve", "pct_explained": 49.9}
+        )
+        == "unresolved"
+    )
+    assert route_after_cpu_investigation({"pct_explained": 90.0}) == "unresolved"
 
 
 def test_route_after_classify():

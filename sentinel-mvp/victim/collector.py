@@ -41,7 +41,7 @@ async def collector_task(redis_client):
             )
             await redis_client.xadd(
                 METRICS_LOOPLAG,
-                {"timestamp": ts, "lag": lag},
+                {"timestamp": ts, "lag": lag, "pid": proc.pid},
                 maxlen=METRICS_MAXLEN,
                 approximate=True,
             )

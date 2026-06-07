@@ -30,16 +30,20 @@ def instrument_memory(redis_client):
         op_name = fn.__name__
 
         async def wrapper(*args, **kwargs):
-            snap0 = tracemalloc.take_snapshot()
+            tracing = tracemalloc.is_tracing()
+            snap0 = tracemalloc.take_snapshot() if tracing else None
             t0 = time.perf_counter()
 
             result = await fn(*args, **kwargs)
 
             self_time = time.perf_counter() - t0
-            snap1 = tracemalloc.take_snapshot()
-            diff = snap1.compare_to(snap0, "lineno")
-            py_delta = sum(s.size_diff for s in diff)
-            top_alloc = diff[0] if diff else None
+            py_delta = 0
+            top_alloc = None
+            if tracing:
+                snap1 = tracemalloc.take_snapshot()
+                diff = snap1.compare_to(snap0, "lineno")
+                py_delta = sum(s.size_diff for s in diff)
+                top_alloc = diff[0] if diff else None
 
             # Span attributes for the Weave trace (best-effort).
             try:
@@ -57,8 +61,9 @@ def instrument_memory(redis_client):
             # clamped to 0 so a leaking op's score only ever grows — ranking,
             # not accounting.
             try:
-                if py_delta > 0:
+                if tracing and py_delta > 0:
                     await redis_client.zincrby(_ATTRIB_MEM, py_delta, op_name)
+                await redis_client.zincrby(_ATTRIB_CPU, self_time, op_name)
                 await redis_client.hincrby(_ATTRIB_INVOCATIONS, op_name, 1)
             except Exception:
                 # Measurement must never kill the victim.
@@ -73,5 +78,6 @@ def instrument_memory(redis_client):
 
 
 # Imported here (not at top of decorated module) to keep the contract local.
+from redis_keys import ATTRIB_CPU as _ATTRIB_CPU  # noqa: E402
 from redis_keys import ATTRIB_INVOCATIONS as _ATTRIB_INVOCATIONS  # noqa: E402
 from redis_keys import ATTRIB_MEM as _ATTRIB_MEM  # noqa: E402

@@ -8,6 +8,7 @@ from .nodes import (
     n_await_approval,
     n_check_diagnosis,
     n_classify_cause,
+    n_cpu_investigate,
     n_evidence_collector,
     n_memory_investigate,
     n_plan_fix,
@@ -21,6 +22,7 @@ from .nodes import (
 )
 from .routing import (
     route_after_classify,
+    route_after_cpu_investigation,
     route_after_diagnosis_check,
     route_after_investigation,
     route_after_self_test,
@@ -47,6 +49,7 @@ def build_incident_graph():
 
     graph.add_node("triage", n_triage)
     graph.add_node("memory_investigate", n_memory_investigate)
+    graph.add_node("cpu_investigate", n_cpu_investigate)
     graph.add_node("evidence_collector", n_evidence_collector)
     graph.add_node("classify_cause", n_classify_cause)
     graph.add_node("retrieve_fix", n_retrieve_fix)
@@ -64,7 +67,16 @@ def build_incident_graph():
     graph.add_conditional_edges(
         "triage",
         route_after_triage,
-        {"investigate": "memory_investigate", "unresolved": "report_unresolved"},
+        {
+            "investigate": "memory_investigate",
+            "cpu_investigate": "cpu_investigate",
+            "unresolved": "report_unresolved",
+        },
+    )
+    graph.add_conditional_edges(
+        "cpu_investigate",
+        route_after_cpu_investigation,
+        {"classify": "classify_cause", "unresolved": "report_unresolved"},
     )
     graph.add_conditional_edges(
         "memory_investigate",

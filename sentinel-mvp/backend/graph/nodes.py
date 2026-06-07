@@ -11,10 +11,11 @@ import os
 
 import weave
 
-from agents.attributor import attribute_anomaly
+from agents.attributor import attribute_anomaly, attribute_cpu
 from agents.diagnostician import diagnose, fix_code_diff, read_op_source
-from utils.redis_client import get_last_n_rss, redis
+from utils.redis_client import get_last_n_looplag, get_last_n_rss, redis
 from utils.redis_keys import (
+    ATTRIB_CPU,
     ATTRIB_INVOCATIONS,
     ATTRIB_MEM,
     FIX_CACHE_PREFIX,
@@ -175,6 +176,29 @@ async def n_memory_investigate(state: dict) -> dict:
     )
 
 
+@weave.op(name="sentinel.cpu_investigate")
+async def n_cpu_investigate(state: dict) -> dict:
+    enriched = await attribute_cpu(state.get("anomaly") or {})
+    evidence = enriched.get("evidence") or {}
+    blamed_op = enriched.get("blamed_op")
+    pct_explained = evidence.get("pct_of_compute_explained", 0.0)
+    update = {
+        "status": "INVESTIGATING_CPU",
+        "blamed_op": blamed_op,
+        "confidence": _confidence_score(enriched.get("confidence")),
+        "pct_explained": pct_explained,
+        "evidence": [evidence],
+        "investigation_rounds": state.get("investigation_rounds", 0) + 1,
+    }
+    return await _finish(
+        state,
+        update,
+        "cpu_investigate",
+        "attribute",
+        f"{blamed_op or 'none'} explains {pct_explained:.1f}% of compute",
+    )
+
+
 @weave.op(name="sentinel.evidence_collector")
 async def n_evidence_collector(state: dict) -> dict:
     update = {
@@ -195,6 +219,9 @@ async def n_evidence_collector(state: dict) -> dict:
 async def n_classify_cause(state: dict) -> dict:
     if state.get("symptom_type") == "memory_leak" and state.get("blamed_op"):
         subcause = "unbounded_collection"
+        confidence = 0.9
+    elif state.get("symptom_type") == "cpu_hotpath" and state.get("blamed_op"):
+        subcause = "sync_io_in_async_loop"
         confidence = 0.9
     else:
         subcause = "unknown"
@@ -320,8 +347,11 @@ async def n_check_diagnosis(state: dict) -> dict:
 async def n_self_test(state: dict) -> dict:
     proposed_fix = state.get("proposed_fix") or {}
     fix_confidence = proposed_fix.get("confidence", state.get("confidence"))
-    slope_before = (state.get("anomaly") or {}).get("slope", 0)
+    anomaly = state.get("anomaly") or {}
+    slope_before = anomaly.get("slope", 0)
     slope_after = slope_before
+    lag_before = anomaly.get("lag_mean", 0) or 1
+    lag_after = lag_before
     confidence = "low"
 
     if not proposed_fix or fix_confidence == "failed":
@@ -329,24 +359,47 @@ async def n_self_test(state: dict) -> dict:
     elif "_self_test_should_pass" in state:
         # Test-only override takes precedence over the offline simulation.
         passed = bool(state["_self_test_should_pass"])
-        slope_after = slope_before * 0.05 if passed else slope_before
+        if state.get("suspected_subcause") == "sync_io_in_async_loop":
+            lag_after = lag_before * 0.1 if passed else lag_before
+        else:
+            slope_after = slope_before * 0.05 if passed else slope_before
     elif state.get("suspected_subcause") == "unbounded_collection":
         slope_before, slope_after = _simulate_unbounded_collection_self_test(slope_before)
         passed = slope_after <= 0.2 * slope_before
+    elif state.get("suspected_subcause") == "sync_io_in_async_loop":
+        fix_text = " ".join(
+            str(proposed_fix.get(key, ""))
+            for key in ("fix_strategy", "diagnosis", "summary")
+        ).lower()
+        passed = "run_in_executor" in fix_text or "offload" in fix_text
+        lag_after = lag_before * 0.1 if passed else lag_before
     else:
         passed = False
 
     if passed:
         confidence = "high"
 
+    test_result = {
+        "tests_passed": passed,
+        "confidence": confidence,
+    }
+    if state.get("suspected_subcause") == "sync_io_in_async_loop":
+        test_result.update(
+            {
+                "lag_before": lag_before,
+                "lag_after": lag_after,
+            }
+        )
+    else:
+        test_result.update(
+            {
+                "rss_slope_before": slope_before,
+                "rss_slope_after": slope_after,
+            }
+        )
     update = {
         "status": "TESTING_FIX",
-        "test_result": {
-            "tests_passed": passed,
-            "rss_slope_before": slope_before,
-            "rss_slope_after": slope_after,
-            "confidence": confidence,
-        },
+        "test_result": test_result,
     }
     return await _finish(
         state,
@@ -373,7 +426,7 @@ async def n_await_approval(state: dict) -> dict:
 async def n_apply(state: dict) -> dict:
     try:
         await redis.set(VICTIM_MODE, "fixed")
-        await redis.delete(ATTRIB_MEM, ATTRIB_INVOCATIONS)
+        await redis.delete(ATTRIB_MEM, ATTRIB_INVOCATIONS, ATTRIB_CPU)
     except Exception:
         pass
     update = {"status": "APPLYING_FIX"}
@@ -387,25 +440,43 @@ async def n_verify(state: dict) -> dict:
     # (collector samples every 2s) before measuring, so recovery is real and
     # the new pid's slope — not the dying buggy pid's — is what we score.
     await asyncio.sleep(_VERIFY_WAIT_S)
-    samples = await get_last_n_rss(30)
-    if len(samples) >= 5:
-        slope_after, _ = linregress(
-            [sample["timestamp"] for sample in samples],
-            [sample["rss"] for sample in samples],
+    anomaly = state.get("anomaly") or {}
+    if state.get("symptom_type") == "cpu_hotpath":
+        samples = await get_last_n_looplag(10)
+        lag_after = (
+            sum(sample["lag"] for sample in samples) / len(samples)
+            if samples
+            else 0
         )
+        lag_before = anomaly.get("lag_mean", 0) or 1
+        reduction = 1 - (lag_after / lag_before)
+        verification = {
+            "lag_before": lag_before,
+            "lag_after": lag_after,
+            "reduction_pct": reduction * 100,
+            "recovered": reduction >= RECOVERY_REDUCTION_TARGET,
+        }
     else:
-        slope_after = 0
-    slope_before = (state.get("anomaly") or {}).get("slope", 0) or 1
-    reduction = 1 - (slope_after / slope_before)
-    recovered = reduction >= RECOVERY_REDUCTION_TARGET
-    update = {
-        "status": "VERIFYING_RECOVERY",
-        "verification": {
+        samples = await get_last_n_rss(30)
+        if len(samples) >= 5:
+            slope_after, _ = linregress(
+                [sample["timestamp"] for sample in samples],
+                [sample["rss"] for sample in samples],
+            )
+        else:
+            slope_after = 0
+        slope_before = anomaly.get("slope", 0) or 1
+        reduction = 1 - (slope_after / slope_before)
+        verification = {
             "slope_before": slope_before,
             "slope_after": slope_after,
             "reduction_pct": reduction * 100,
-            "recovered": recovered,
-        },
+            "recovered": reduction >= RECOVERY_REDUCTION_TARGET,
+        }
+    recovered = reduction >= RECOVERY_REDUCTION_TARGET
+    update = {
+        "status": "VERIFYING_RECOVERY",
+        "verification": verification,
     }
     return await _finish(
         state,

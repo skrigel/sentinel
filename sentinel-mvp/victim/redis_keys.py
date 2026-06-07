@@ -11,6 +11,7 @@ METRICS_MAXLEN = 2000
 
 # Cumulative per-op attribution
 ATTRIB_MEM = "attrib:mem"  # ZSet {op_name: cumulative_bytes}
+ATTRIB_CPU = "attrib:cpu"  # ZSet {op_name: cumulative_self_time_s}
 ATTRIB_INVOCATIONS = "attrib:invocations"  # Hash {op_name: call_count}
 
 # Baseline for anomaly detection
@@ -23,6 +24,7 @@ TIMELINE_MAXLEN = 500
 
 # Control flags
 VICTIM_MODE = "victim:mode"  # String: "buggy" | "fixed"
+VICTIM_BEAT = "victim:beat"  # String: "memory" | "cpu"
 SETTINGS_AUTO_APPROVE = "settings:auto_approve"  # String: "1" | "0"
 
 # Pub/sub channels
