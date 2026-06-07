@@ -242,31 +242,28 @@ const PHASE_TO_INTERVENTION_STATUS: Record<ActionType, Intervention['status']> =
   completed: 'verified',
 };
 
-/** Current incident as a single Intervention card (0 or 1), for the activity feed. */
-export function buildInterventions(inc: IncidentDocument | null): Intervention[] {
-  if (!inc || !inc.status || inc.status === 'IDLE') return [];
+/** Map one incident document to an Intervention card view model. */
+export function incidentToIntervention(inc: IncidentDocument): Intervention {
   const fix = inc.proposed_fix;
   const v = inc.verification;
   const phase = statusToPhase(inc.status);
-  return [
-    {
-      id: inc.incident_id ?? 'inc',
-      timestamp: (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000,
-      agentId: VICTIM_AGENT_ID,
-      agentName: VICTIM_AGENT_NAME,
-      type: 'memory',
-      severity: severityFromAnomaly(inc),
-      issue: inc.suspected_subcause || inc.symptom_type || 'anomaly',
-      rootCause: fix?.root_cause || fix?.diagnosis || 'Attributing root cause…',
-      proposedFix: fix?.fix_strategy || fix?.summary || 'Pending diagnosis',
-      status: PHASE_TO_INTERVENTION_STATUS[phase],
-      // Carry the diff through apply/verify/resolved so it stays visible after
-      // the victim is flipped to fixed mode.
-      code: fix?.code ?? undefined,
-      metricsBefore: inc.anomaly ? +(inc.anomaly.slope / 1024 / 1024).toFixed(2) : 0,
-      metricsAfter: v ? +(v.slope_after / 1024 / 1024).toFixed(2) : undefined,
-    },
-  ];
+  return {
+    id: inc.incident_id ?? 'inc',
+    timestamp: (inc.anomaly?.start_ts ?? Date.now() / 1000) * 1000,
+    agentId: VICTIM_AGENT_ID,
+    agentName: VICTIM_AGENT_NAME,
+    type: 'memory',
+    severity: severityFromAnomaly(inc),
+    issue: inc.suspected_subcause || inc.symptom_type || 'anomaly',
+    rootCause: fix?.root_cause || fix?.diagnosis || 'Attributing root cause…',
+    proposedFix: fix?.fix_strategy || fix?.summary || 'Pending diagnosis',
+    status: PHASE_TO_INTERVENTION_STATUS[phase],
+    // Carry the diff through apply/verify/resolved so it stays viewable after
+    // the victim is flipped to fixed mode.
+    code: fix?.code ?? undefined,
+    metricsBefore: inc.anomaly ? +(inc.anomaly.slope / 1024 / 1024).toFixed(2) : 0,
+    metricsAfter: v ? +(v.slope_after / 1024 / 1024).toFixed(2) : undefined,
+  };
 }
 
 /** True while an active, unresolved incident warrants the issue toast. */
@@ -296,6 +293,20 @@ export async function fetchIncident(): Promise<IncidentDocument | null> {
 export async function fetchTimeline(): Promise<SentinelAction[]> {
   const events = await getJson<TimelineEvent[]>('/api/timeline');
   return timelineToActions(events);
+}
+
+/** Durable, cross-incident agent activity (SQLite-backed), oldest-first. */
+export async function fetchActivity(limit = 300): Promise<SentinelAction[]> {
+  const events = await getJson<TimelineEvent[]>(`/api/activity?limit=${limit}`);
+  return timelineToActions(events);
+}
+
+/** Durable per-incident interventions (newest-first) for the Agent Activity feed. */
+export async function fetchInterventions(limit = 50): Promise<Intervention[]> {
+  const docs = await getJson<IncidentDocument[]>(`/api/interventions?limit=${limit}`);
+  return docs
+    .filter((d) => d.status && d.status !== 'IDLE')
+    .map(incidentToIntervention);
 }
 
 /** RSS memory series (MB) for the live chart, oldest-first. */

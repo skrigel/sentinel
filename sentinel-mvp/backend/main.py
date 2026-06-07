@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from agents import attributor, detector, diagnostician
 from agents.supervisor import Supervisor
+from utils.activity_db import fetch_activity, fetch_incidents, init_activity_db
 from utils.redis_client import get_last_n_rss, iter_pubsub_messages, redis
 from utils.redis_keys import (
     ATTRIB_INVOCATIONS,
@@ -56,6 +57,28 @@ async def _auto_approve_enabled() -> bool:
         return (await redis.get(SETTINGS_AUTO_APPROVE)) == "1"
     except Exception:
         return False
+
+
+# After a successful fix, hold RESOLVED briefly so the UI can show recovery, then
+# return the state machine to its IDLE start state (durable history lives in SQLite).
+RESOLVED_LINGER_S = 6.0
+
+
+def _was_recovered(result: dict) -> bool:
+    verification = (result or {}).get("verification") or {}
+    return bool(verification.get("recovered"))
+
+
+async def _return_to_idle_after(delay: float = RESOLVED_LINGER_S) -> None:
+    await asyncio.sleep(delay)
+    await redis.hset(
+        INCIDENT_CURRENT, mapping={"state": "IDLE", "data": json.dumps({})}
+    )
+    await redis.publish(
+        EVENTS_STATE, json.dumps({"new_state": "IDLE", "incident": {}})
+    )
+    if ORCHESTRATOR == "graph":
+        await _get_graph_runner().reset()
 
 
 async def _anomaly_listener():
@@ -101,7 +124,9 @@ async def _graph_anomaly_listener():
         # resumes it deterministically (no LLM on the coordination path).
         if result.get("status") == "AWAITING_APPROVAL" and await _auto_approve_enabled():
             try:
-                await runner.approve_and_apply()
+                applied = await runner.approve_and_apply()
+                if _was_recovered(applied):
+                    asyncio.create_task(_return_to_idle_after())
             except Exception:
                 pass
 
@@ -109,6 +134,7 @@ async def _graph_anomaly_listener():
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     init_weave()
+    await init_activity_db()
     _tasks.append(asyncio.create_task(detector.detect_anomaly()))
     if ORCHESTRATOR == "graph":
         _tasks.append(asyncio.create_task(_graph_anomaly_listener()))
@@ -172,6 +198,18 @@ async def get_timeline(n: int = 100):
     return events
 
 
+@app.get("/api/activity")
+async def get_activity(limit: int = 300, offset: int = 0):
+    """Durable, cross-incident agent activity (SQLite), oldest-first per page."""
+    return await fetch_activity(limit=limit, offset=offset)
+
+
+@app.get("/api/interventions")
+async def get_interventions(limit: int = 50):
+    """Durable per-incident snapshots (newest-first) for the Agent Activity feed."""
+    return await fetch_incidents(limit=limit)
+
+
 @app.get("/api/incident")
 async def get_incident():
     state = await redis.hget(INCIDENT_CURRENT, "state")
@@ -218,8 +256,12 @@ async def apply_fix():
     try:
         if ORCHESTRATOR == "graph":
             result = await _get_graph_runner().approve_and_apply()
+            if _was_recovered(result):
+                asyncio.create_task(_return_to_idle_after())
             return {"status": "done", "verification": result.get("verification")}
         result = await supervisor.apply_fix()
+        if supervisor.state == "RESOLVED":
+            asyncio.create_task(_return_to_idle_after())
         return {"status": "done", "verification": result}
     except ValueError as e:
         return {"status": "error", "error": str(e)}

@@ -4,6 +4,7 @@ import json
 import time
 from typing import Any
 
+from utils.activity_db import record_activity, record_incident
 from utils.redis_client import redis
 from utils.redis_keys import (
     EVENTS_NARRATION,
@@ -38,6 +39,8 @@ async def broadcast(state: dict) -> None:
             EVENTS_STATE,
             json.dumps({"new_state": status, "incident": payload}, default=str),
         )
+        # Persist the incident snapshot so resolved interventions stay in the feed.
+        await record_incident(payload)
     except Exception:
         pass
 
@@ -78,6 +81,18 @@ async def narrate(
             },
             maxlen=TIMELINE_MAXLEN,
             approximate=True,
+        )
+        # Durable cross-incident history (SQLite).
+        await record_activity(
+            {
+                "node": node,
+                "decision": decision,
+                "reason": reason,
+                "confidence": None if confidence is None else str(confidence),
+                "status": status,
+                "incident_id": incident_id,
+                "timestamp": ts,
+            }
         )
     except Exception:
         pass

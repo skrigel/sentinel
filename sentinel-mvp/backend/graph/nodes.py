@@ -5,13 +5,14 @@ side effects are guarded, and existing agents are reused through their public
 async signatures.
 """
 
+import asyncio
 import json
 import os
 
 import weave
 
 from agents.attributor import attribute_anomaly
-from agents.diagnostician import diagnose, read_op_source
+from agents.diagnostician import diagnose, fix_code_diff, read_op_source
 from utils.redis_client import get_last_n_rss, redis
 from utils.redis_keys import (
     ATTRIB_INVOCATIONS,
@@ -28,6 +29,9 @@ from .state import RECOVERY_REDUCTION_TARGET
 _hallucination_scorer = None
 _SELF_TEST_ITERATIONS = 40
 _SELF_TEST_WINDOW_K = 8
+# Seconds to wait after flipping the victim to fixed mode before measuring
+# recovery (covers the self-exit + Docker restart + a few fresh RSS samples).
+_VERIFY_WAIT_S = float(os.environ.get("VERIFY_WAIT_S", "16"))
 
 # On stage the LLM-judge hallucination gate is too strict (it flags correct but
 # generically-worded diagnoses), so the demo bypasses it. The strict gate still
@@ -253,6 +257,12 @@ async def n_plan_fix(state: dict) -> dict:
         )
         proposed_fix = {**proposal, "source": "llm"}
         reason = "planned fix with diagnostician"
+    # Always attach the concrete code diff (deterministic for the blamed op) so it
+    # is viewable even when the fix came from cache/memory rather than the LLM.
+    if not proposed_fix.get("code"):
+        code = fix_code_diff(state.get("blamed_op"))
+        if code:
+            proposed_fix = {**proposed_fix, "code": code}
     update = {
         "status": "PLANNING_FIX",
         "fix_attempts": fix_attempts,
@@ -372,6 +382,11 @@ async def n_apply(state: dict) -> dict:
 
 @weave.op(name="sentinel.verify")
 async def n_verify(state: dict) -> dict:
+    # Applying the fix flips the victim to fixed mode, which self-exits and is
+    # restarted clean by Docker. Wait for that restart + a few fresh RSS samples
+    # (collector samples every 2s) before measuring, so recovery is real and
+    # the new pid's slope — not the dying buggy pid's — is what we score.
+    await asyncio.sleep(_VERIFY_WAIT_S)
     samples = await get_last_n_rss(30)
     if len(samples) >= 5:
         slope_after, _ = linregress(

@@ -39,6 +39,12 @@ services:
       - DEMO_MODE=${DEMO_MODE:-true}
       # Selects the deterministic LangGraph orchestrator vs the legacy supervisor.
       - ORCHESTRATOR=${ORCHESTRATOR:-legacy}
+      # Durable agent-activity log (SQLite) lives on the mounted volume below.
+      - ACTIVITY_DB_PATH=/data/activity.db
     # Mount victim source so the Diagnostician can read the offending op's code.
     volumes:
       - ./victim:/victim_src:ro
+      - sentinel_data:/data
+
+volumes:
+  sentinel_data:

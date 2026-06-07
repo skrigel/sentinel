@@ -250,7 +250,7 @@ export function SentinelStatus() {
               />
             </div>
 
-            {/* Horizontal Action Timeline */}
+            {/* Horizontal Action Timeline (current incident) */}
             <div>
               <h2 className="text-lg font-medium text-gray-900 mb-4">Action History</h2>
               <div className="bg-white border border-gray-200 rounded-lg p-6 overflow-x-auto">

@@ -6,8 +6,8 @@ import { IssueNotification } from '../components/IssueNotification';
 import { usePolling } from '../hooks/usePolling';
 import {
   buildAgent,
-  buildInterventions,
   fetchIncident,
+  fetchInterventions,
   fetchMemoryMetrics,
   hasActiveIssue,
 } from '../services/sentinelApi';
@@ -17,9 +17,11 @@ export function Dashboard() {
 
   const { data: incident } = usePolling({ fetchFn: fetchIncident, interval: 2000 });
   const { data: memory } = usePolling({ fetchFn: fetchMemoryMetrics, interval: 2000 });
+  // Durable list of past + active interventions (persists across incidents/reset).
+  const { data: interventionList } = usePolling({ fetchFn: fetchInterventions, interval: 3000 });
 
   const agent = buildAgent(incident ?? null, memory ?? []);
-  const interventions = buildInterventions(incident ?? null);
+  const interventions = interventionList ?? [];
   const showNotification = !dismissedIssue && hasActiveIssue(incident ?? null);
 
   return (
@@ -89,7 +91,7 @@ export function Dashboard() {
               ))
             ) : (
               <div className="bg-white border border-gray-200 rounded-lg p-8 text-center">
-                <div className="text-sm text-gray-500">No active interventions</div>
+                <div className="text-sm text-gray-500">No interventions recorded yet</div>
               </div>
             )}
           </div>

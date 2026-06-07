@@ -37,7 +37,7 @@ def read_op_source(op_name: str) -> str:
     return src  # fall back to the whole module
 
 
-def _fix_code_diff(blamed_op: str) -> dict | None:
+def fix_code_diff(blamed_op: str) -> dict | None:
     """The scoped memory beat's concrete fix: unbounded ``conversation_history``
     -> sliding window K=8. Applying the fix flips the victim to the windowed
     branch, so this before/after is the real change the system enacts."""
@@ -154,7 +154,7 @@ async def diagnose(enriched: dict) -> dict:
 
     proposal["blamed_op"] = blamed_op
     proposal["evidence"] = evidence
-    proposal["code"] = _fix_code_diff(blamed_op)
+    proposal["code"] = fix_code_diff(blamed_op)
     proposal["eval"] = evaluate_diagnosis(proposal, GROUND_TRUTH)
 
     await redis.publish(EVENTS_PROPOSAL, json.dumps(proposal))
