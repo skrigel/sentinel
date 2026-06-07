@@ -37,18 +37,24 @@ export function ProposedChangeCard({ change, onApprove, onReject }: ProposedChan
           <div className="text-sm text-gray-700">{change.proposedFix}</div>
         </div>
 
-        {/* Code preview */}
-        <div className="bg-gray-50 border border-gray-200 rounded p-3">
-          <div className="text-xs text-gray-500 mb-2">
-            {change.code.file} · Line {change.code.line}
+        {/* Details preview: a code diff if present, otherwise diagnosis text */}
+        {(change.code || change.diagnosis || change.rootCause) && (
+          <div className="bg-gray-50 border border-gray-200 rounded p-3">
+            <div className="text-xs text-gray-500 mb-2">
+              {change.code
+                ? `${change.code.file} · Line ${change.code.line}`
+                : change.blamedOp
+                  ? `Blamed op: ${change.blamedOp}`
+                  : 'Diagnosis'}
+            </div>
+            <button
+              onClick={() => setShowCode(true)}
+              className="text-xs font-medium text-blue-600 hover:text-blue-700"
+            >
+              {change.code ? 'View code changes →' : 'View diagnosis →'}
+            </button>
           </div>
-          <button
-            onClick={() => setShowCode(true)}
-            className="text-xs font-medium text-blue-600 hover:text-blue-700"
-          >
-            View code changes →
-          </button>
-        </div>
+        )}
 
         {/* Actions */}
         <div className="flex items-center gap-2 pt-2">
@@ -72,31 +78,58 @@ export function ProposedChangeCard({ change, onApprove, onReject }: ProposedChan
         <DialogContent className="max-w-3xl max-h-[80vh] overflow-auto bg-white">
           <DialogHeader>
             <DialogTitle className="text-base font-medium text-gray-900">
-              Proposed Code Changes
+              {change.code ? 'Proposed Code Changes' : 'Diagnosis'}
             </DialogTitle>
             <div className="text-sm text-gray-500">
-              {change.code.file} · Line {change.code.line}
+              {change.code
+                ? `${change.code.file} · Line ${change.code.line}`
+                : change.blamedOp
+                  ? `Blamed op: ${change.blamedOp}`
+                  : change.issue}
             </div>
           </DialogHeader>
 
           <div className="space-y-4 mt-4">
-            <div>
-              <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
-                Before
-              </div>
-              <pre className="bg-red-50 border border-red-100 rounded p-3 text-xs overflow-x-auto">
-                <code className="text-gray-800">{change.code.before}</code>
-              </pre>
-            </div>
+            {change.code ? (
+              <>
+                <div>
+                  <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+                    Before
+                  </div>
+                  <pre className="bg-red-50 border border-red-100 rounded p-3 text-xs overflow-x-auto">
+                    <code className="text-gray-800">{change.code.before}</code>
+                  </pre>
+                </div>
 
-            <div>
-              <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
-                After
-              </div>
-              <pre className="bg-green-50 border border-green-100 rounded p-3 text-xs overflow-x-auto">
-                <code className="text-gray-800">{change.code.after}</code>
-              </pre>
-            </div>
+                <div>
+                  <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+                    After
+                  </div>
+                  <pre className="bg-green-50 border border-green-100 rounded p-3 text-xs overflow-x-auto">
+                    <code className="text-gray-800">{change.code.after}</code>
+                  </pre>
+                </div>
+              </>
+            ) : (
+              <>
+                {change.diagnosis && (
+                  <div>
+                    <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+                      Diagnosis
+                    </div>
+                    <div className="text-sm text-gray-800">{change.diagnosis}</div>
+                  </div>
+                )}
+                {change.rootCause && (
+                  <div>
+                    <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+                      Root Cause
+                    </div>
+                    <div className="text-sm text-gray-800">{change.rootCause}</div>
+                  </div>
+                )}
+              </>
+            )}
 
             <div className="bg-amber-50 border border-amber-200 rounded p-3">
               <div className="text-xs font-medium text-amber-900 mb-1">Fix Summary</div>

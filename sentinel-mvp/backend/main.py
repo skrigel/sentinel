@@ -14,6 +14,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from agents import attributor, detector, diagnostician
 from agents.supervisor import Supervisor
@@ -26,10 +27,12 @@ from utils.redis_keys import (
     EVENTS_PROPOSAL,
     EVENTS_STATE,
     INCIDENT_CURRENT,
+    SETTINGS_AUTO_APPROVE,
     VICTIM_MODE,
 )
 from utils.weave_client import init_weave
 
+# init_weave()
 ORCHESTRATOR = os.environ.get("ORCHESTRATOR", "legacy")
 
 supervisor = Supervisor()
@@ -44,6 +47,14 @@ def _get_graph_runner():
 
         _graph_runner = GraphRunner()
     return _graph_runner
+
+
+async def _auto_approve_enabled() -> bool:
+    """Settings override (CLAUDE.md HITL gate): when on, fixes apply without a human."""
+    try:
+        return (await redis.get(SETTINGS_AUTO_APPROVE)) == "1"
+    except Exception:
+        return False
 
 
 async def _anomaly_listener():
@@ -70,13 +81,26 @@ async def _proposal_listener():
         if msg is None:
             continue
         await supervisor.on_proposal(json.loads(msg["data"]))
+        if await _auto_approve_enabled():
+            try:
+                await supervisor.apply_fix()
+            except ValueError:
+                pass  # not in an applyable state; ignore
 
 
 async def _graph_anomaly_listener():
     async for msg in iter_pubsub_messages(EVENTS_ANOMALY):
         if msg is None:
             continue
-        await _get_graph_runner().start_from_anomaly(json.loads(msg["data"]))
+        runner = _get_graph_runner()
+        result = await runner.start_from_anomaly(json.loads(msg["data"]))
+        # The graph interrupts before apply for human approval; auto-approve
+        # resumes it deterministically (no LLM on the coordination path).
+        if result.get("status") == "AWAITING_APPROVAL" and await _auto_approve_enabled():
+            try:
+                await runner.approve_and_apply()
+            except Exception:
+                pass
 
 
 @contextlib.asynccontextmanager
@@ -171,6 +195,21 @@ async def apply_fix():
         return {"status": "done", "verification": result}
     except ValueError as e:
         return {"status": "error", "error": str(e)}
+
+
+class SettingsUpdate(BaseModel):
+    auto_approve: bool
+
+
+@app.get("/api/settings")
+async def get_settings():
+    return {"auto_approve": await _auto_approve_enabled()}
+
+
+@app.post("/api/settings")
+async def update_settings(body: SettingsUpdate):
+    await redis.set(SETTINGS_AUTO_APPROVE, "1" if body.auto_approve else "0")
+    return {"auto_approve": body.auto_approve}
 
 
 @app.post("/api/force-detection")

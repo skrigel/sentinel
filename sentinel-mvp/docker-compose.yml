@@ -37,6 +37,8 @@ services:
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - WEAVE_PROJECT=${WEAVE_PROJECT:-sentinel}
       - DEMO_MODE=${DEMO_MODE:-true}
+      # Selects the deterministic LangGraph orchestrator vs the legacy supervisor.
+      - ORCHESTRATOR=${ORCHESTRATOR:-legacy}
     # Mount victim source so the Diagnostician can read the offending op's code.
     volumes:
       - ./victim:/victim_src:ro

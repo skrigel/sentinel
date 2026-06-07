@@ -42,7 +42,12 @@ export interface ProposedChange {
   issue: string;
   severity: 'warning' | 'critical';
   proposedFix: string;
-  code: {
+  // Real diagnostician output from the backend (no code diff is produced).
+  diagnosis?: string;
+  rootCause?: string;
+  blamedOp?: string | null;
+  // Optional code diff; the backend does not produce one, so it may be absent.
+  code?: {
     file: string;
     before: string;
     after: string;

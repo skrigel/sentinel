@@ -21,6 +21,7 @@ INCIDENT_CURRENT = "incident:current"  # Hash {state, data}
 
 # Control flags
 VICTIM_MODE = "victim:mode"  # String: "buggy" | "fixed"
+SETTINGS_AUTO_APPROVE = "settings:auto_approve"  # String: "1" | "0"
 
 # Pub/sub channels
 EVENTS_ANOMALY = "events:anomaly"

@@ -1,33 +1,77 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Settings } from 'lucide-react';
-import { mockSentinelPlan, mockProposedChanges } from '../sentinelMockData';
 import { ProposedChangeCard } from '../components/ProposedChangeCard';
 import { StateMachineGraph } from '../components/StateMachineGraph';
 import { HorizontalActionTimeline } from '../components/HorizontalActionTimeline';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { usePolling } from '../hooks/usePolling';
-import { fetchSentinelState } from '../services/sentinelApi';
+import {
+  applyFix,
+  buildActions,
+  buildProposedChanges,
+  buildSentinelPlan,
+  buildSentinelState,
+  fetchAutoApprove,
+  fetchIncident,
+  forceDetection,
+  resetIncident,
+  setAutoApprove as persistAutoApprove,
+} from '../services/sentinelApi';
 import { ActionType } from '../sentinelTypes';
 
 export function SentinelStatus() {
   const [autoApprove, setAutoApprove] = useState(false);
-  const [proposedChanges, setProposedChanges] = useState(mockProposedChanges);
   const [filterState, setFilterState] = useState<ActionType | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Poll for Sentinel state every 3 seconds
-  const { data, lastUpdated, isLoading } = usePolling({
-    fetchFn: fetchSentinelState,
-    interval: 3000,
+  // Hydrate the auto-approve toggle from the backend (it's a server-side gate).
+  useEffect(() => {
+    fetchAutoApprove().then(setAutoApprove).catch(() => {});
+  }, []);
+
+  const toggleAutoApprove = async () => {
+    const next = !autoApprove;
+    setAutoApprove(next); // optimistic
+    try {
+      await persistAutoApprove(next);
+    } catch {
+      setAutoApprove(!next); // revert on failure
+    }
+  };
+  // Optimistic latch so the approval card disappears the moment we POST /api/apply,
+  // before the next poll reflects the backend's APPLYING_FIX status.
+  const [applying, setApplying] = useState(false);
+
+  // Poll the live incident document; everything below is derived from it.
+  const { data: incident, lastUpdated, isLoading, refetch } = usePolling({
+    fetchFn: fetchIncident,
+    interval: 2000,
   });
 
-  const handleApprove = (id: string) => {
-    setProposedChanges(prev => prev.filter(c => c.id !== id));
+  const sentinelState = incident ? buildSentinelState(incident) : null;
+  const plan = buildSentinelPlan(incident ?? null);
+  const actions = incident ? buildActions(incident) : [];
+  const proposedChanges = applying ? [] : buildProposedChanges(incident ?? null);
+
+  const handleApprove = async () => {
+    setApplying(true);
+    try {
+      await applyFix();
+    } finally {
+      await refetch();
+      setApplying(false);
+    }
   };
 
-  const handleReject = (id: string) => {
-    setProposedChanges(prev => prev.filter(c => c.id !== id));
+  const handleReject = async () => {
+    setApplying(true);
+    try {
+      await resetIncident();
+    } finally {
+      await refetch();
+      setApplying(false);
+    }
   };
 
   const handleStateClick = (state: ActionType) => {
@@ -45,8 +89,10 @@ export function SentinelStatus() {
   };
 
   const filteredActions = filterState
-    ? data?.recentActions.filter(a => a.type === filterState) || []
-    : data?.recentActions || [];
+    ? actions.filter(a => a.type === filterState)
+    : actions;
+
+  const hasIncident = !!sentinelState && sentinelState.activeAgent !== null;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -65,6 +111,21 @@ export function SentinelStatus() {
                   <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-orange-500 animate-pulse' : 'bg-green-500'}`} />
                   Last updated: {formatLastUpdated(lastUpdated)}
                 </div>
+              )}
+              {!hasIncident ? (
+                <button
+                  onClick={() => forceDetection().then(refetch)}
+                  className="px-3 py-1.5 bg-gray-900 text-white text-xs font-medium rounded hover:bg-gray-800 transition-colors"
+                >
+                  Force Detection
+                </button>
+              ) : (
+                <button
+                  onClick={() => resetIncident().then(refetch)}
+                  className="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-medium rounded hover:bg-gray-50 transition-colors"
+                >
+                  Reset
+                </button>
               )}
               <button
                 onClick={() => setShowSettings(true)}
@@ -92,11 +153,13 @@ export function SentinelStatus() {
                 {/* Current Status */}
                 <div>
                   <div className="flex items-center gap-3 mb-2">
-                    <div className="w-3 h-3 rounded-full bg-orange-500 animate-pulse" />
-                    <div className="text-sm font-medium text-gray-900">Active</div>
+                    <div className={`w-3 h-3 rounded-full ${hasIncident ? 'bg-orange-500 animate-pulse' : 'bg-gray-300'}`} />
+                    <div className="text-sm font-medium text-gray-900">
+                      {hasIncident ? 'Active' : 'Idle'}
+                    </div>
                   </div>
                   <div className="text-sm text-gray-600 leading-relaxed">
-                    {mockSentinelPlan.current}
+                    {plan.current}
                   </div>
                 </div>
 
@@ -105,7 +168,7 @@ export function SentinelStatus() {
 
                 {/* Current Plan Steps */}
                 <div className="space-y-3">
-                  {mockSentinelPlan.steps.map((step, index) => (
+                  {plan.steps.map((step, index) => (
                     <div key={index} className="flex items-start gap-3">
                       <div className="shrink-0 mt-1">
                         {step.status === 'completed' && (
@@ -173,7 +236,7 @@ export function SentinelStatus() {
                 )}
               </h2>
               <StateMachineGraph
-                currentState={data?.state.currentState || 'proposing'}
+                currentState={sentinelState?.currentState || 'detecting'}
                 onStateClick={handleStateClick}
               />
             </div>
@@ -208,7 +271,7 @@ export function SentinelStatus() {
                 </div>
               </div>
               <button
-                onClick={() => setAutoApprove(!autoApprove)}
+                onClick={toggleAutoApprove}
                 className={`shrink-0 w-11 h-6 rounded-full transition-colors ${
                   autoApprove ? 'bg-gray-900' : 'bg-gray-300'
                 }`}
