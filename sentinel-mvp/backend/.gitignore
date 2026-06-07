@@ -1,0 +1,5 @@
+# Throwaway SQLite registry + uploads created by the test suite.
+.pytest-data/
+.testdata/
+.pytest_cache/
+__pycache__/
